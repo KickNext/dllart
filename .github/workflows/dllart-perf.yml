@@ -45,8 +45,25 @@ jobs:
       - name: Build example
         run: dart run dllart build --config example/calc/dllart.json
 
+      - name: Probe runtime loading support
+        id: runtime_probe
+        shell: bash
+        run: |
+          source scripts/runtime_support.sh
+          if dllart_runtime_dlopen_supported; then
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            echo "Runtime probe failed on $(uname -s); ABI contract gate will be skipped."
+          fi
+
       - name: ABI contract (skip rebuild)
+        if: steps.runtime_probe.outputs.supported == 'true'
         run: dart run dllart test --config example/calc/dllart.json --skip-build --json
+
+      - name: ABI contract skipped
+        if: steps.runtime_probe.outputs.supported != 'true'
+        run: echo "Skipping ABI contract gate because runtime is not dlopen-compatible for this SDK build."
 
   perf:
     needs: abi-gate
@@ -68,17 +85,32 @@ jobs:
       - name: Build example
         run: dart run dllart build --config example/calc/dllart.json
 
+      - name: Probe runtime loading support
+        id: runtime_probe
+        shell: bash
+        run: |
+          source scripts/runtime_support.sh
+          if dllart_runtime_dlopen_supported; then
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            echo "Runtime probe failed on $(uname -s); perf gates will be skipped."
+          fi
+
       - name: Benchmark (single-thread)
+        if: steps.runtime_probe.outputs.supported == 'true'
         run: |
           mkdir -p .artifacts/perf
           scripts/benchmark.sh 120000 | tee .artifacts/perf/benchmark.txt
 
       - name: Benchmark (multi-thread)
+        if: steps.runtime_probe.outputs.supported == 'true'
         run: |
           mkdir -p .artifacts/perf
           scripts/benchmark_threads.sh 8 8 50000 | tee .artifacts/perf/benchmark_threads.txt
 
       - name: Perf gate
+        if: steps.runtime_probe.outputs.supported == 'true'
         run: |
           mkdir -p .artifacts/perf
           dart run dllart test \
@@ -86,6 +118,12 @@ jobs:
             --skip-build \
             --perf-gate \
             --json | tee .artifacts/perf/perf_gate.json
+
+      - name: Perf steps skipped
+        if: steps.runtime_probe.outputs.supported != 'true'
+        run: |
+          mkdir -p .artifacts/perf
+          echo "Skipped on $(uname -s): runtime is not dlopen-compatible for this SDK build." > .artifacts/perf/SKIPPED.txt
 
       - name: Upload perf artifacts
         if: always()

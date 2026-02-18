@@ -5,6 +5,7 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 EXAMPLE_DIR="$ROOT_DIR/example/calc"
 CONFIG_PATH="$EXAMPLE_DIR/dllart.json"
 BUILD_DIR="$EXAMPLE_DIR/build/calc"
+source "$ROOT_DIR/scripts/runtime_support.sh"
 cd "$ROOT_DIR"
 
 POOL_SIZE="${1:-1}"
@@ -14,6 +15,11 @@ PER_THREAD="${3:-100000}"
 dart pub get
 (cd "$EXAMPLE_DIR" && dart pub get)
 dart run dllart build --config "$CONFIG_PATH"
+
+if ! dllart_runtime_dlopen_supported; then
+  echo "Skipping benchmark_threads on Linux: dartaotruntime is not dlopen-compatible for this SDK build."
+  exit 0
+fi
 
 clang -O3 \
   "$ROOT_DIR/scripts/benchmarks/ffi_bench_threads.c" \

@@ -4,6 +4,8 @@ import 'package:dllart/src/cli/app.dart';
 import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
+import 'runtime_support.dart';
+
 ParsedArgs _args(
   Map<String, String> options, [
   List<String> positional = const <String>[],
@@ -41,6 +43,12 @@ void main() {
       if (!hasClang) {
         stderr.writeln(
           'Skipping direct lifecycle test: clang is not available.',
+        );
+        return;
+      }
+      if (shouldSkipRuntimeDependentLinuxTests()) {
+        stderr.writeln(
+          'Skipping direct lifecycle test on Linux: dartaotruntime is not dlopen-compatible for this SDK build.',
         );
         return;
       }
@@ -161,6 +169,12 @@ void main() {
     final hasClang = await _hasClang();
     if (!hasClang) {
       stderr.writeln('Skipping direct init/make test: clang is not available.');
+      return;
+    }
+    if (shouldSkipRuntimeDependentLinuxTests()) {
+      stderr.writeln(
+        'Skipping direct init/make test on Linux: dartaotruntime is not dlopen-compatible for this SDK build.',
+      );
       return;
     }
 

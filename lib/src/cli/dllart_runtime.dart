@@ -179,6 +179,11 @@ String _runtimeExecutableNameForHost() {
   return Platform.isWindows ? 'dartaotruntime.exe' : 'dartaotruntime';
 }
 
+String _sidecarExecutableNameForHost(String moduleName) {
+  final base = '${_sanitizeForC(moduleName).toLowerCase()}_dllart_sidecar';
+  return Platform.isWindows ? '$base.exe' : base;
+}
+
 String _readSdkVersion(String sdkRoot) {
   final versionPath = p.join(sdkRoot, 'version');
   final file = File(versionPath);

@@ -5,11 +5,17 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 EXAMPLE_DIR="$ROOT_DIR/example/calc"
 CONFIG_PATH="$EXAMPLE_DIR/dllart.json"
 BUILD_DIR="$EXAMPLE_DIR/build/calc"
+source "$ROOT_DIR/scripts/runtime_support.sh"
 cd "$ROOT_DIR"
 
 dart pub get
 (cd "$EXAMPLE_DIR" && dart pub get)
 dart run dllart build --config "$CONFIG_PATH"
+
+if ! dllart_runtime_dlopen_supported; then
+  echo "Skipping smoke test on Linux: dartaotruntime is not dlopen-compatible for this SDK build."
+  exit 0
+fi
 
 UNAME_OUT=$(uname -s)
 if [[ "$UNAME_OUT" == "Darwin" ]]; then

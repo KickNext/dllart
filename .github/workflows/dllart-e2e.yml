@@ -59,11 +59,31 @@ jobs:
       - name: Smoke (multi-module)
         run: scripts/multi_module_smoke.sh
 
+      - name: Runtime mode matrix
+        run: scripts/runtime_mode_matrix.sh
+
       - name: Build example
         run: dart run dllart build --config example/calc/dllart.json
 
+      - name: Probe runtime loading support
+        id: runtime_probe
+        shell: bash
+        run: |
+          source scripts/runtime_support.sh
+          if dllart_runtime_dlopen_supported; then
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            echo "Runtime probe failed on $(uname -s); ABI contract step will be skipped."
+          fi
+
       - name: ABI contract (skip rebuild)
+        if: steps.runtime_probe.outputs.supported == 'true'
         run: dart run dllart test --config example/calc/dllart.json --skip-build --json
+
+      - name: ABI contract skipped
+        if: steps.runtime_probe.outputs.supported != 'true'
+        run: echo "Skipping ABI contract step because runtime is not dlopen-compatible for this SDK build."
 
       - name: Upload example artifact
         if: always()

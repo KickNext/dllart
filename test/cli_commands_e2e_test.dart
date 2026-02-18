@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
+import 'runtime_support.dart';
+
 final String _repoRoot = p.normalize(Directory.current.path);
 
 Future<ProcessResult> _runCli(List<String> args, {String? workingDirectory}) {
@@ -43,6 +45,12 @@ void main() {
       final hasClang = await _hasClang();
       if (!hasClang) {
         stderr.writeln('Skipping e2e flow test: clang is not available.');
+        return;
+      }
+      if (shouldSkipRuntimeDependentLinuxTests()) {
+        stderr.writeln(
+          'Skipping e2e flow test on Linux: dartaotruntime is not dlopen-compatible for this SDK build.',
+        );
         return;
       }
 
@@ -177,6 +185,12 @@ void main() {
     final hasClang = await _hasClang();
     if (!hasClang) {
       stderr.writeln('Skipping init/make test: clang is not available.');
+      return;
+    }
+    if (shouldSkipRuntimeDependentLinuxTests()) {
+      stderr.writeln(
+        'Skipping init/make test on Linux: dartaotruntime is not dlopen-compatible for this SDK build.',
+      );
       return;
     }
 

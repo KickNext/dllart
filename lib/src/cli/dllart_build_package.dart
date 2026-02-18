@@ -74,6 +74,13 @@ Future<void> _commandBuild(ParsedArgs args) async {
       await File(
         generatedEntrypoint,
       ).writeAsString(_generateEntrypoint(sourcePath, exports));
+      final generatedSidecarEntrypoint = p.join(
+        generatedDir.path,
+        '${loaded.config.name}_sidecar.dart',
+      );
+      await File(
+        generatedSidecarEntrypoint,
+      ).writeAsString(_generateSidecarEntrypoint(generatedEntrypoint));
 
       final generatedApi = p.join(
         includeDir.path,
@@ -103,8 +110,8 @@ Future<void> _commandBuild(ParsedArgs args) async {
         frontendArgs.add('--packages=${_frontendUriArg(packagesConfig)}');
       }
       frontendArgs.addAll(<String>[
-        '--output-dill=${_frontendUriArg(aotDill)}',
-        _frontendUriArg(generatedEntrypoint),
+        '--output-dill=${_frontendPathArg(aotDill)}',
+        _frontendPathArg(generatedEntrypoint),
       ]);
 
       _logLine('[1/4] Compiling AOT dill');
@@ -136,6 +143,8 @@ Future<void> _commandBuild(ParsedArgs args) async {
       String? libFileName;
       String? runtimeFileName;
       String? bundledRuntimePath;
+      String? sidecarFileName;
+      String? sidecarBinaryPath;
       var symbolsExported = false;
 
       if (buildTarget == 'host') {
@@ -163,6 +172,17 @@ Future<void> _commandBuild(ParsedArgs args) async {
         final runtimePathForDefine = toolchain.dartaot.replaceAll('\\', '/');
         final runtimeDefine =
             '-DDLLART_DEFAULT_RUNTIME_PATH="$runtimePathForDefine"';
+        sidecarFileName = _sidecarExecutableNameForHost(loaded.config.name);
+        final resolvedSidecarBinaryPath = p.join(
+          outputPath,
+          'runtime',
+          sidecarFileName,
+        );
+        sidecarBinaryPath = resolvedSidecarBinaryPath;
+        final sidecarPathForDefine =
+            resolvedSidecarBinaryPath.replaceAll('\\', '/');
+        final sidecarDefine =
+            '-DDLLART_DEFAULT_SIDECAR_PATH="$sidecarPathForDefine"';
         final runtimeVersionDefine =
             '-DDLLART_EXPECTED_DART_VERSION="${_escapeCString(toolchain.dartSdkVersion)}"';
 
@@ -173,6 +193,7 @@ Future<void> _commandBuild(ParsedArgs args) async {
           '-O2',
           ..._bridgeSymbolDefines(loaded.config.name),
           runtimeDefine,
+          sidecarDefine,
           runtimeVersionDefine,
           '-DDLLART_JSON_IN_MAX_BYTES=${loaded.config.limits.jsonInMaxBytes}',
           '-DDLLART_JSON_OUT_MAX_BYTES=${loaded.config.limits.jsonOutMaxBytes}',
@@ -207,15 +228,29 @@ Future<void> _commandBuild(ParsedArgs args) async {
         final runtimeDir = Directory(p.join(outputPath, 'runtime'));
         runtimeDir.createSync(recursive: true);
         runtimeFileName = _runtimeExecutableNameForHost();
-        bundledRuntimePath = p.join(runtimeDir.path, runtimeFileName);
-        await File(toolchain.dartaot).copy(bundledRuntimePath);
+        final resolvedRuntimePath = p.join(runtimeDir.path, runtimeFileName);
+        bundledRuntimePath = resolvedRuntimePath;
+        await File(toolchain.dartaot).copy(resolvedRuntimePath);
         if (!Platform.isWindows) {
-          Process.runSync('chmod', <String>['+x', bundledRuntimePath]);
+          Process.runSync('chmod', <String>['+x', resolvedRuntimePath]);
+        }
+        _logLine('[host] Compiling sidecar runtime helper');
+        await _runCommand(toolchain.dart, <String>[
+          'compile',
+          'exe',
+          _frontendPathArg(generatedSidecarEntrypoint),
+          '-o',
+          _frontendPathArg(resolvedSidecarBinaryPath),
+        ]);
+        if (!Platform.isWindows) {
+          Process.runSync('chmod', <String>['+x', resolvedSidecarBinaryPath]);
         }
 
         libFileName = p.basename(outputLib);
         checksums['library_sha256'] = _sha256File(outputLib);
-        checksums['runtime_sha256'] = _sha256File(bundledRuntimePath);
+        checksums['runtime_sha256'] = _sha256File(resolvedRuntimePath);
+        checksums['sidecar_sha256'] = _sha256File(resolvedSidecarBinaryPath);
+        toolchainChecks['sidecar_runtime'] = resolvedSidecarBinaryPath;
 
         await File(cmakeConfigPath).writeAsString(
           _generateCMakeConfig(
@@ -232,6 +267,7 @@ Future<void> _commandBuild(ParsedArgs args) async {
             outputPath: outputPath,
             libraryFileName: libFileName,
             runtimeFileName: runtimeFileName,
+            sidecarFileName: sidecarFileName,
             runtimeExpectedSdkVersion: toolchain.dartSdkVersion,
           ),
         );
@@ -300,6 +336,8 @@ Future<void> _commandBuild(ParsedArgs args) async {
           libraryFileName: libFileName,
           runtimeFileName: runtimeFileName,
           runtimePath: bundledRuntimePath,
+          sidecarFileName: sidecarFileName,
+          sidecarPath: sidecarBinaryPath,
           runtimeExpectedSdkVersion: toolchain.dartSdkVersion,
           runtimeProfile: runtimeProfile,
           generatedAtUtc: generatedAt,
@@ -329,6 +367,7 @@ Future<void> _commandBuild(ParsedArgs args) async {
         if (cmakeExists) 'cmake_config': cmakeConfigPath,
         if (pkgConfigExists) 'pkg_config': pkgConfigPath,
         if (bundledRuntimePath != null) 'runtime': bundledRuntimePath,
+        if (sidecarBinaryPath != null) 'sidecar_runtime': sidecarBinaryPath,
         'runtime_profile': runtimeProfile,
         'requested_target': buildTarget,
         'effective_target': effectiveTarget,
@@ -355,6 +394,9 @@ Future<void> _commandBuild(ParsedArgs args) async {
           }
           if (bundledRuntimePath != null) {
             stdout.writeln('Runtime:      $bundledRuntimePath');
+          }
+          if (sidecarBinaryPath != null) {
+            stdout.writeln('Sidecar:      $sidecarBinaryPath');
           }
           stdout.writeln('Runtime prof: $runtimeProfile');
           stdout.writeln('Target req:   $buildTarget');
@@ -724,19 +766,24 @@ Future<Map<String, Object?>> _buildIosArtifacts({
       target: 'x86_64-apple-ios12.0-simulator',
       genSnapshot: _resolveIosGenSnapshot(toolchain: toolchain, arch: 'x64'),
     );
-    simulatorLib = p.join(iosRoot.path, 'simulator', 'lib$moduleName.dylib');
-    Directory(p.dirname(simulatorLib)).createSync(recursive: true);
+    final simulatorLibPath = p.join(
+      iosRoot.path,
+      'simulator',
+      'lib$moduleName.dylib',
+    );
+    simulatorLib = simulatorLibPath;
+    Directory(p.dirname(simulatorLibPath)).createSync(recursive: true);
     await _runCommand('xcrun', <String>[
       'lipo',
       '-create',
       simArm64,
       simX64,
       '-output',
-      simulatorLib,
+      simulatorLibPath,
     ]);
     builtSlices['simulator-arm64'] = simArm64;
     builtSlices['simulator-x86_64'] = simX64;
-    builtSlices['simulator-universal'] = simulatorLib;
+    builtSlices['simulator-universal'] = simulatorLibPath;
   }
 
   final xcframeworkPath = p.join(iosRoot.path, '$moduleName.xcframework');
@@ -1142,7 +1189,9 @@ Future<void> _commandPackage(ParsedArgs args) async {
     String manifestPath,
     Map<String, Object?> manifest,
     String? runtimeBinaryPath,
+    String? runtimeSidecarPath,
     bool hostRuntimeExists,
+    bool hostSidecarExists,
     String hostLibraryPath,
     bool hostLibraryExists,
     Map<String, String> androidAbiLibraries,
@@ -1158,8 +1207,11 @@ Future<void> _commandPackage(ParsedArgs args) async {
     final manifestPath = p.join(outputPath, 'artifact.json');
     final manifest = _readArtifactManifestMap(manifestPath);
     final runtimeBinaryPath = _manifestRuntimeBinaryPath(manifest);
+    final runtimeSidecarPath = _manifestRuntimeSidecarPath(manifest);
     final hostRuntimeExists =
         runtimeBinaryPath != null && File(runtimeBinaryPath).existsSync();
+    final hostSidecarExists =
+        runtimeSidecarPath != null && File(runtimeSidecarPath).existsSync();
     final hostLibraryPath =
         _libraryPathFromManifest(manifestPath) ??
         _outputLibraryPath(p.join(outputPath, 'lib'), loaded.config.name);
@@ -1174,7 +1226,9 @@ Future<void> _commandPackage(ParsedArgs args) async {
       manifestPath: manifestPath,
       manifest: manifest,
       runtimeBinaryPath: runtimeBinaryPath,
+      runtimeSidecarPath: runtimeSidecarPath,
       hostRuntimeExists: hostRuntimeExists,
+      hostSidecarExists: hostSidecarExists,
       hostLibraryPath: hostLibraryPath,
       hostLibraryExists: hostLibraryExists,
       androidAbiLibraries: androidAbiLibraries,
@@ -1189,7 +1243,9 @@ Future<void> _commandPackage(ParsedArgs args) async {
       String manifestPath,
       Map<String, Object?> manifest,
       String? runtimeBinaryPath,
+      String? runtimeSidecarPath,
       bool hostRuntimeExists,
+      bool hostSidecarExists,
       String hostLibraryPath,
       bool hostLibraryExists,
       Map<String, String> androidAbiLibraries,
@@ -1469,10 +1525,12 @@ Future<void> _commandPackage(ParsedArgs args) async {
   }
 
   final runtimeBinaryPath = state.runtimeBinaryPath;
+  final runtimeSidecarPath = state.runtimeSidecarPath;
   final runtimeFileName = runtimeBinaryPath == null
       ? null
       : p.basename(runtimeBinaryPath);
   final hostRuntimeExists = state.hostRuntimeExists;
+  final hostSidecarExists = state.hostSidecarExists;
   final hostLibraryPath = state.hostLibraryPath;
   final androidAbiLibraries = state.androidAbiLibraries;
   final iosXcframeworkPath = state.iosXcframeworkPath;
@@ -1482,17 +1540,30 @@ Future<void> _commandPackage(ParsedArgs args) async {
   Directory(packageRoot).createSync(recursive: true);
 
   final generated = <String>[];
-  if (hostRuntimeExists) {
-    final runtimeSourcePath = runtimeBinaryPath!;
-    final runtimeName = runtimeFileName!;
+  if (hostRuntimeExists || hostSidecarExists) {
     final packageRuntimeDir = p.join(packageRoot, 'runtime');
     _prepareDirectory(packageRuntimeDir, force: force);
-    await File(runtimeSourcePath).copy(p.join(packageRuntimeDir, runtimeName));
-    if (!Platform.isWindows) {
-      Process.runSync('chmod', <String>[
-        '+x',
-        p.join(packageRuntimeDir, runtimeName),
-      ]);
+    if (hostRuntimeExists) {
+      final runtimeSourcePath = runtimeBinaryPath!;
+      final runtimeName = runtimeFileName!;
+      await File(runtimeSourcePath).copy(p.join(packageRuntimeDir, runtimeName));
+      if (!Platform.isWindows) {
+        Process.runSync('chmod', <String>[
+          '+x',
+          p.join(packageRuntimeDir, runtimeName),
+        ]);
+      }
+    }
+    if (hostSidecarExists) {
+      final sidecarSourcePath = runtimeSidecarPath!;
+      final sidecarName = p.basename(sidecarSourcePath);
+      await File(sidecarSourcePath).copy(p.join(packageRuntimeDir, sidecarName));
+      if (!Platform.isWindows) {
+        Process.runSync('chmod', <String>[
+          '+x',
+          p.join(packageRuntimeDir, sidecarName),
+        ]);
+      }
     }
     generated.add(packageRuntimeDir);
   }
@@ -1537,6 +1608,7 @@ Future<void> _commandPackage(ParsedArgs args) async {
       includeHeader: includeHeader,
       artifactManifestPath: manifestPath,
       runtimeBinaryPath: hostRuntimeExists ? runtimeBinaryPath : null,
+      runtimeSidecarPath: hostSidecarExists ? runtimeSidecarPath : null,
       androidAbiLibraries: androidAbiLibraries,
       iosXcframeworkPath: iosXcframeworkPath,
       flutterDir: flutterDir,
@@ -1552,6 +1624,7 @@ Future<void> _commandPackage(ParsedArgs args) async {
       artifactManifestPath: manifestPath,
       hostLibraryPath: hostLibraryPath,
       runtimeBinaryPath: hostRuntimeExists ? runtimeBinaryPath : null,
+      runtimeSidecarPath: hostSidecarExists ? runtimeSidecarPath : null,
       pythonDir: pythonDir,
     );
     generated.add(pythonDir);
@@ -1565,6 +1638,7 @@ Future<void> _commandPackage(ParsedArgs args) async {
       artifactManifestPath: manifestPath,
       hostLibraryPath: hostLibraryPath,
       runtimeBinaryPath: hostRuntimeExists ? runtimeBinaryPath : null,
+      runtimeSidecarPath: hostSidecarExists ? runtimeSidecarPath : null,
       csharpDir: csharpDir,
     );
     generated.add(csharpDir);
@@ -1949,6 +2023,7 @@ Future<void> _generateFlutterPluginPackage({
   required String includeHeader,
   required String artifactManifestPath,
   required String? runtimeBinaryPath,
+  required String? runtimeSidecarPath,
   required Map<String, String> androidAbiLibraries,
   required String? iosXcframeworkPath,
   required String flutterDir,
@@ -2016,6 +2091,18 @@ Future<void> _generateFlutterPluginPackage({
       ]);
     }
   }
+  if (runtimeSidecarPath != null) {
+    final sidecarFileName = p.basename(runtimeSidecarPath);
+    await File(
+      runtimeSidecarPath,
+    ).copy(p.join(nativeRuntimeDir, sidecarFileName));
+    if (!Platform.isWindows) {
+      Process.runSync('chmod', <String>[
+        '+x',
+        p.join(nativeRuntimeDir, sidecarFileName),
+      ]);
+    }
+  }
 
   await File(p.join(flutterDir, 'pubspec.yaml')).writeAsString(
     _generateFlutterPluginPubspec(
@@ -2060,6 +2147,7 @@ Future<void> _generatePythonPackage({
   required String artifactManifestPath,
   required String hostLibraryPath,
   required String? runtimeBinaryPath,
+  required String? runtimeSidecarPath,
   required String pythonDir,
 }) async {
   final runtimePrefix = _moduleRuntimePrefix(moduleName);
@@ -2081,6 +2169,13 @@ Future<void> _generatePythonPackage({
     await File(runtimeBinaryPath).copy(destination);
     if (!Platform.isWindows) {
       Process.runSync('chmod', <String>['+x', destination]);
+    }
+  }
+  if (runtimeSidecarPath != null) {
+    final sidecarDestination = p.join(runtimeDir, p.basename(runtimeSidecarPath));
+    await File(runtimeSidecarPath).copy(sidecarDestination);
+    if (!Platform.isWindows) {
+      Process.runSync('chmod', <String>['+x', sidecarDestination]);
     }
   }
 
@@ -2111,6 +2206,7 @@ Future<void> _generateCSharpPackage({
   required String artifactManifestPath,
   required String hostLibraryPath,
   required String? runtimeBinaryPath,
+  required String? runtimeSidecarPath,
   required String csharpDir,
 }) async {
   final runtimePrefix = _moduleRuntimePrefix(moduleName);
@@ -2132,6 +2228,13 @@ Future<void> _generateCSharpPackage({
     await File(runtimeBinaryPath).copy(destination);
     if (!Platform.isWindows) {
       Process.runSync('chmod', <String>['+x', destination]);
+    }
+  }
+  if (runtimeSidecarPath != null) {
+    final sidecarDestination = p.join(runtimeDir, p.basename(runtimeSidecarPath));
+    await File(runtimeSidecarPath).copy(sidecarDestination);
+    if (!Platform.isWindows) {
+      Process.runSync('chmod', <String>['+x', sidecarDestination]);
     }
   }
 
@@ -2212,6 +2315,15 @@ Map<String, Object?> _manifestMobileOutputs(Map<String, Object?> manifest) {
 String? _manifestRuntimeBinaryPath(Map<String, Object?> manifest) {
   final paths = _asStringObjectMap(manifest['paths']);
   final value = paths['runtime_binary'];
+  if (value is! String || value.trim().isEmpty) {
+    return null;
+  }
+  return p.normalize(value);
+}
+
+String? _manifestRuntimeSidecarPath(Map<String, Object?> manifest) {
+  final paths = _asStringObjectMap(manifest['paths']);
+  final value = paths['runtime_sidecar_binary'];
   if (value is! String || value.trim().isEmpty) {
     return null;
   }

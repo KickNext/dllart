@@ -643,6 +643,210 @@ void main() {}
 ''';
 }
 
+String _generateSidecarEntrypoint(String entrypointPath) {
+  final entrypointUri = Uri.file(p.normalize(entrypointPath)).toString();
+  return '''import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import '$entrypointUri' as module;
+
+Future<Uint8List> _readStdinBytes() async {
+  final data = <int>[];
+  await for (final chunk in stdin) {
+    data.addAll(chunk);
+  }
+  return Uint8List.fromList(data);
+}
+
+Never _fail(String message, [Object? error, StackTrace? stack]) {
+  stderr.write(message);
+  if (error != null) {
+    stderr.write('\\n');
+    stderr.write(error.toString());
+  }
+  if (stack != null) {
+    stderr.write('\\n');
+    stderr.write(stack.toString());
+  }
+  exit(1);
+}
+
+int _parseIntArg(String value, String name) {
+  try {
+    return int.parse(value);
+  } on FormatException {
+    _fail('Invalid integer for \$name: \$value');
+  }
+}
+
+double _parseDoubleArg(String value, String name) {
+  try {
+    return double.parse(value);
+  } on FormatException {
+    _fail('Invalid double for \$name: \$value');
+  }
+}
+
+Future<void> main(List<String> args) async {
+  if (args.isEmpty) {
+    _fail('Missing sidecar operation argument');
+  }
+
+  final op = args.first;
+  try {
+    switch (op) {
+      case 'ping':
+        stdout.write('ok');
+        return;
+      case 'json':
+        if (args.length != 2) {
+          _fail('json expects 1 argument: method');
+        }
+        final payload = utf8.decode(await _readStdinBytes());
+        stdout.write(module.dllart_dispatch(args[1], payload));
+        return;
+      case 'json_batch':
+        if (args.length != 1) {
+          _fail('json_batch expects no extra arguments');
+        }
+        final payload = utf8.decode(await _readStdinBytes());
+        stdout.write(module.dllart_dispatch_batch(payload));
+        return;
+      case 'json_raw':
+        if (args.length != 2) {
+          _fail('json_raw expects 1 argument: method');
+        }
+        final payload = utf8.decode(await _readStdinBytes());
+        stdout.write(module.dllart_dispatch_raw(args[1], payload));
+        return;
+      case 'i64_2':
+        if (args.length != 4) {
+          _fail('i64_2 expects 3 arguments: method a b');
+        }
+        final value = module.dllart_dispatch_i64_2(
+          args[1],
+          _parseIntArg(args[2], 'a'),
+          _parseIntArg(args[3], 'b'),
+        );
+        stdout.write(value.toString());
+        return;
+      case 'i64_2_index':
+        if (args.length != 4) {
+          _fail('i64_2_index expects 3 arguments: methodId a b');
+        }
+        final value = module.dllart_dispatch_i64_2_index(
+          _parseIntArg(args[1], 'methodId'),
+          _parseIntArg(args[2], 'a'),
+          _parseIntArg(args[3], 'b'),
+        );
+        stdout.write(value.toString());
+        return;
+      case 'i64_4':
+        if (args.length != 6) {
+          _fail('i64_4 expects 5 arguments: method a b c d');
+        }
+        final value = module.dllart_dispatch_i64_4(
+          args[1],
+          _parseIntArg(args[2], 'a'),
+          _parseIntArg(args[3], 'b'),
+          _parseIntArg(args[4], 'c'),
+          _parseIntArg(args[5], 'd'),
+        );
+        stdout.write(value.toString());
+        return;
+      case 'i64_4_index':
+        if (args.length != 6) {
+          _fail('i64_4_index expects 5 arguments: methodId a b c d');
+        }
+        final value = module.dllart_dispatch_i64_4_index(
+          _parseIntArg(args[1], 'methodId'),
+          _parseIntArg(args[2], 'a'),
+          _parseIntArg(args[3], 'b'),
+          _parseIntArg(args[4], 'c'),
+          _parseIntArg(args[5], 'd'),
+        );
+        stdout.write(value.toString());
+        return;
+      case 'f64_2':
+        if (args.length != 4) {
+          _fail('f64_2 expects 3 arguments: method a b');
+        }
+        final value = module.dllart_dispatch_f64_2(
+          args[1],
+          _parseDoubleArg(args[2], 'a'),
+          _parseDoubleArg(args[3], 'b'),
+        );
+        stdout.write(value.toString());
+        return;
+      case 'f64_2_index':
+        if (args.length != 4) {
+          _fail('f64_2_index expects 3 arguments: methodId a b');
+        }
+        final value = module.dllart_dispatch_f64_2_index(
+          _parseIntArg(args[1], 'methodId'),
+          _parseDoubleArg(args[2], 'a'),
+          _parseDoubleArg(args[3], 'b'),
+        );
+        stdout.write(value.toString());
+        return;
+      case 'f64_4':
+        if (args.length != 6) {
+          _fail('f64_4 expects 5 arguments: method a b c d');
+        }
+        final value = module.dllart_dispatch_f64_4(
+          args[1],
+          _parseDoubleArg(args[2], 'a'),
+          _parseDoubleArg(args[3], 'b'),
+          _parseDoubleArg(args[4], 'c'),
+          _parseDoubleArg(args[5], 'd'),
+        );
+        stdout.write(value.toString());
+        return;
+      case 'f64_4_index':
+        if (args.length != 6) {
+          _fail('f64_4_index expects 5 arguments: methodId a b c d');
+        }
+        final value = module.dllart_dispatch_f64_4_index(
+          _parseIntArg(args[1], 'methodId'),
+          _parseDoubleArg(args[2], 'a'),
+          _parseDoubleArg(args[3], 'b'),
+          _parseDoubleArg(args[4], 'c'),
+          _parseDoubleArg(args[5], 'd'),
+        );
+        stdout.write(value.toString());
+        return;
+      case 'bytes':
+        if (args.length != 2) {
+          _fail('bytes expects 1 argument: method');
+        }
+        final payload = await _readStdinBytes();
+        final result = module.dllart_dispatch_bytes(args[1], payload);
+        stdout.add(result);
+        await stdout.flush();
+        return;
+      case 'bytes_index':
+        if (args.length != 2) {
+          _fail('bytes_index expects 1 argument: methodId');
+        }
+        final payload = await _readStdinBytes();
+        final result = module.dllart_dispatch_bytes_index(
+          _parseIntArg(args[1], 'methodId'),
+          payload,
+        );
+        stdout.add(result);
+        await stdout.flush();
+        return;
+      default:
+        _fail('Unknown sidecar operation: \$op');
+    }
+  } catch (error, stack) {
+    _fail('Sidecar operation failed: \$op', error, stack);
+  }
+}
+''';
+}
+
 String _generateApiHeader(String moduleName, List<ExportedFunction> exports) {
   final guard = 'DLLART_${_sanitizeForC(moduleName).toUpperCase()}_API_H';
   final prefix = _sanitizeForC(moduleName).toLowerCase();
@@ -1052,6 +1256,8 @@ String _generateArtifactManifest({
   required String? libraryFileName,
   required String? runtimeFileName,
   required String? runtimePath,
+  required String? sidecarFileName,
+  required String? sidecarPath,
   required String runtimeExpectedSdkVersion,
   required String runtimeProfile,
   required DateTime generatedAtUtc,
@@ -1109,12 +1315,15 @@ String _generateArtifactManifest({
       if (libraryFileName != null) 'library': p.join(libDir, libraryFileName),
       if (runtimePath != null) 'runtime': runtimeDir,
       if (runtimePath != null) 'runtime_binary': runtimePath,
+      if (sidecarPath != null) 'runtime_sidecar_binary': sidecarPath,
       'integration': integrationDir,
       'module_api_header': p.join(includeDir, '${moduleName}_api.h'),
     },
     'runtime': <String, Object?>{
       if (runtimeFileName != null) 'binary': runtimeFileName,
+      if (sidecarFileName != null) 'sidecar_binary': sidecarFileName,
       'bundled': runtimePath != null,
+      'sidecar_bundled': sidecarPath != null,
       'expected_sdk_version': runtimeExpectedSdkVersion,
       'profile': runtimeProfile,
       if (runtimeFileName != null)
@@ -1154,6 +1363,8 @@ String _generateArtifactManifest({
         'library_sha256': checksums['library_sha256'],
       if (checksums['runtime_sha256'] != null)
         'runtime_sha256': checksums['runtime_sha256'],
+      if (checksums['sidecar_sha256'] != null)
+        'sidecar_sha256': checksums['sidecar_sha256'],
       'module_api_header_sha256': checksums['module_api_header_sha256'],
       'manifest_sha256': '',
     },
@@ -1207,6 +1418,7 @@ String _generateArtifactUsage({
   required String outputPath,
   required String libraryFileName,
   required String runtimeFileName,
+  String? sidecarFileName,
   required String runtimeExpectedSdkVersion,
 }) {
   final rootRel = p.relative(outputPath, from: Directory.current.path);
@@ -1232,6 +1444,7 @@ Target: `$target`
 - Headers: `$includeRel`
 - Library: `$libRel/$libraryFileName`
 - Runtime: `$rootRel/runtime/$runtimeFileName`
+- Sidecar: `${sidecarFileName == null ? '(not bundled)' : '$rootRel/runtime/$sidecarFileName'}`
 - CMake config: `$cmakeRel`
 
 Runtime expected SDK version: `$runtimeExpectedSdkVersion`

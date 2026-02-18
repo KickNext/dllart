@@ -7,6 +7,7 @@ CONFIG_PATH="$EXAMPLE_DIR/dllart.json"
 BUILD_ROOT="$EXAMPLE_DIR/build"
 PRIMARY_BUILD_DIR="$BUILD_ROOT/calc"
 SECONDARY_BUILD_DIR="$BUILD_ROOT/calc2"
+source "$ROOT_DIR/scripts/runtime_support.sh"
 cd "$ROOT_DIR"
 
 dart pub get
@@ -40,6 +41,11 @@ dart run dllart build \
   --name calc2 \
   --source "$TMP_SOURCE" \
   --output "$SECONDARY_BUILD_DIR"
+
+if ! dllart_runtime_dlopen_supported; then
+  echo "Skipping multi-module smoke on Linux: dartaotruntime is not dlopen-compatible for this SDK build."
+  exit 0
+fi
 
 cat > "$BUILD_ROOT/multi_module_smoke.c" <<'C'
 #include <stdio.h>

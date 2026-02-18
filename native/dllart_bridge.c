@@ -5,6 +5,8 @@
 #include "dllart_bridge.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -17,12 +19,19 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 #include "dart_api.h"
 
 #ifndef DLLART_DEFAULT_RUNTIME_PATH
 #define DLLART_DEFAULT_RUNTIME_PATH ""
+#endif
+
+#ifndef DLLART_DEFAULT_SIDECAR_PATH
+#define DLLART_DEFAULT_SIDECAR_PATH ""
 #endif
 
 #ifndef DLLART_EXPECTED_DART_VERSION
@@ -183,9 +192,17 @@ typedef struct {
   bool call_mutex_ready;
 } DllartIsolateState;
 
+typedef enum {
+  DLLART_RUNTIME_MODE_NONE = 0,
+  DLLART_RUNTIME_MODE_IN_PROCESS = 1,
+  DLLART_RUNTIME_MODE_SIDECAR = 2,
+} DllartRuntimeMode;
+
 typedef struct {
   dllart_library_t runtime_handle;
   char* runtime_path;
+  char* sidecar_path;
+  DllartRuntimeMode runtime_mode;
   bool vm_initialized;
   bool vm_initialized_by_dllart;
   DllartIsolateState* isolates;
@@ -233,6 +250,11 @@ static int dllart_validate_cstring_length(const char* value,
                                           size_t max_bytes,
                                           const char* field_name,
                                           char** error_out);
+
+typedef struct {
+  uint8_t* data;
+  size_t len;
+} DllartByteBuffer;
 
 #if defined(_WIN32)
 static INIT_ONCE g_mutex_once = INIT_ONCE_STATIC_INIT;
@@ -529,6 +551,140 @@ static const char* dllart_pick_runtime_path(const char* runtime_path,
     return DLLART_DEFAULT_RUNTIME_PATH;
   }
   return NULL;
+}
+
+static const char* dllart_sidecar_basename(void) {
+  if (DLLART_DEFAULT_SIDECAR_PATH[0] == '\0') {
+#if defined(_WIN32)
+    return "dllart_sidecar.exe";
+#else
+    return "dllart_sidecar";
+#endif
+  }
+
+  const char* slash = strrchr(DLLART_DEFAULT_SIDECAR_PATH, '/');
+  const char* backslash = strrchr(DLLART_DEFAULT_SIDECAR_PATH, '\\');
+  const char* cut = slash;
+  if (backslash != NULL && (cut == NULL || backslash > cut)) {
+    cut = backslash;
+  }
+  if (cut == NULL || cut[1] == '\0') {
+    return DLLART_DEFAULT_SIDECAR_PATH;
+  }
+  return cut + 1;
+}
+
+static char* dllart_find_sidecar_near_self(void) {
+  char* self_path = dllart_self_library_path();
+  if (self_path == NULL) {
+    return NULL;
+  }
+
+  char* self_dir = dllart_dirname_dup(self_path);
+  free(self_path);
+  if (self_dir == NULL) {
+    return NULL;
+  }
+
+  const char* basename = dllart_sidecar_basename();
+  char* candidate = dllart_join_path(self_dir, basename);
+  if (candidate != NULL && dllart_file_exists(candidate)) {
+    free(self_dir);
+    return candidate;
+  }
+  free(candidate);
+
+  char* runtime_dir = dllart_join_path(self_dir, "runtime");
+  if (runtime_dir != NULL) {
+    candidate = dllart_join_path(runtime_dir, basename);
+    free(runtime_dir);
+    if (candidate != NULL && dllart_file_exists(candidate)) {
+      free(self_dir);
+      return candidate;
+    }
+    free(candidate);
+  }
+
+  char* parent_dir = dllart_dirname_dup(self_dir);
+  if (parent_dir != NULL) {
+    char* parent_runtime_dir = dllart_join_path(parent_dir, "runtime");
+    free(parent_dir);
+    if (parent_runtime_dir != NULL) {
+      candidate = dllart_join_path(parent_runtime_dir, basename);
+      free(parent_runtime_dir);
+      if (candidate != NULL && dllart_file_exists(candidate)) {
+        free(self_dir);
+        return candidate;
+      }
+      free(candidate);
+    }
+  }
+
+  free(self_dir);
+  return NULL;
+}
+
+static const char* dllart_pick_sidecar_path(char** owned_path_out) {
+  if (owned_path_out != NULL) {
+    *owned_path_out = NULL;
+  }
+
+  {
+    const char* from_env = getenv("DLLART_SIDECAR_RUNTIME");
+    if (from_env != NULL && from_env[0] != '\0') {
+      return from_env;
+    }
+  }
+
+  if (owned_path_out != NULL) {
+    char* from_bundle = dllart_find_sidecar_near_self();
+    if (from_bundle != NULL) {
+      *owned_path_out = from_bundle;
+      return from_bundle;
+    }
+  }
+
+  if (DLLART_DEFAULT_SIDECAR_PATH[0] != '\0') {
+    return DLLART_DEFAULT_SIDECAR_PATH;
+  }
+  return NULL;
+}
+
+typedef enum {
+  DLLART_RUNTIME_PREF_AUTO = 0,
+  DLLART_RUNTIME_PREF_INPROCESS = 1,
+  DLLART_RUNTIME_PREF_SIDECAR = 2,
+} DllartRuntimePreference;
+
+static bool dllart_case_equals(const char* left, const char* right) {
+  if (left == NULL || right == NULL) {
+    return false;
+  }
+  while (*left != '\0' && *right != '\0') {
+    if (tolower((unsigned char)*left) != tolower((unsigned char)*right)) {
+      return false;
+    }
+    left++;
+    right++;
+  }
+  return *left == '\0' && *right == '\0';
+}
+
+static DllartRuntimePreference dllart_runtime_preference(void) {
+  const char* raw = getenv("DLLART_RUNTIME_MODE");
+  if (raw == NULL || raw[0] == '\0') {
+    return DLLART_RUNTIME_PREF_AUTO;
+  }
+  if (dllart_case_equals(raw, "auto")) {
+    return DLLART_RUNTIME_PREF_AUTO;
+  }
+  if (dllart_case_equals(raw, "inprocess")) {
+    return DLLART_RUNTIME_PREF_INPROCESS;
+  }
+  if (dllart_case_equals(raw, "sidecar")) {
+    return DLLART_RUNTIME_PREF_SIDECAR;
+  }
+  return DLLART_RUNTIME_PREF_AUTO;
 }
 
 static bool dllart_version_prefix_matches(const char* actual,
@@ -974,6 +1130,14 @@ static int dllart_load_runtime_symbols(char** error_out) {
   return 0;
 }
 
+static void dllart_release_sidecar_path(void) {
+  free(g_state.sidecar_path);
+  g_state.sidecar_path = NULL;
+  if (g_state.runtime_mode == DLLART_RUNTIME_MODE_SIDECAR) {
+    g_state.runtime_mode = DLLART_RUNTIME_MODE_NONE;
+  }
+}
+
 static void dllart_release_runtime_handle(void) {
   if (g_state.runtime_handle != NULL) {
     dllart_dlclose(g_state.runtime_handle);
@@ -983,6 +1147,9 @@ static void dllart_release_runtime_handle(void) {
   g_state.runtime_path = NULL;
   g_state.vm_initialized_by_dllart = false;
   memset(&g_state.api, 0, sizeof(g_state.api));
+  if (g_state.runtime_mode == DLLART_RUNTIME_MODE_IN_PROCESS) {
+    g_state.runtime_mode = DLLART_RUNTIME_MODE_NONE;
+  }
 }
 
 static int dllart_cleanup_vm(char** error_out) {
@@ -1081,6 +1248,39 @@ static int dllart_open_runtime(const char* runtime_path, char** error_out) {
     }
   }
 
+  return 0;
+}
+
+static int dllart_open_sidecar(char** error_out) {
+  if (g_state.sidecar_path != NULL &&
+      g_state.runtime_mode == DLLART_RUNTIME_MODE_SIDECAR) {
+    return 0;
+  }
+
+  char* owned_path = NULL;
+  const char* picked_path = dllart_pick_sidecar_path(&owned_path);
+  if (picked_path == NULL || picked_path[0] == '\0') {
+    free(owned_path);
+    return dllart_set_error(
+        error_out,
+        "No sidecar runtime path provided. Set DLLART_SIDECAR_RUNTIME, bundle "
+        "sidecar near library, or build with DLLART_DEFAULT_SIDECAR_PATH.");
+  }
+  if (!dllart_file_exists(picked_path)) {
+    free(owned_path);
+    return dllart_set_error_with_context(
+        error_out, "Sidecar runtime path does not exist", picked_path);
+  }
+
+  char* resolved = owned_path != NULL ? owned_path : dllart_strdup(picked_path);
+  if (resolved == NULL) {
+    return dllart_set_error(error_out,
+                            "Out of memory while setting sidecar runtime path");
+  }
+
+  free(g_state.sidecar_path);
+  g_state.sidecar_path = resolved;
+  g_state.runtime_mode = DLLART_RUNTIME_MODE_SIDECAR;
   return 0;
 }
 
@@ -1719,6 +1919,8 @@ static int dllart_teardown_state(char** error_out) {
     status = -1;
   }
   dllart_release_runtime_handle();
+  dllart_release_sidecar_path();
+  g_state.runtime_mode = DLLART_RUNTIME_MODE_NONE;
   return status;
 }
 
@@ -1885,6 +2087,18 @@ static int dllart_call_on_real_thread(DllartThreadCallFn fn,
 
 static bool dllart_should_proxy_thread_call(void) {
   if (g_dllart_in_helper_thread > 0) {
+    return false;
+  }
+  // Sidecar mode does not invoke the Dart embedder API directly, so an extra
+  // helper-thread hop only adds latency without improving stack safety.
+  if (dllart_runtime_preference() == DLLART_RUNTIME_PREF_SIDECAR) {
+    return false;
+  }
+  DllartRuntimeMode mode = DLLART_RUNTIME_MODE_NONE;
+  dllart_mutex_lock();
+  mode = g_state.runtime_mode;
+  dllart_mutex_unlock();
+  if (mode == DLLART_RUNTIME_MODE_SIDECAR) {
     return false;
   }
   const char* force = getenv("DLLART_FORCE_HELPER_THREAD");
@@ -2134,6 +2348,573 @@ static int dllart_shutdown_thread_entry(void* context) {
   return 0;
 }
 
+static DllartRuntimeMode dllart_runtime_mode_snapshot(void) {
+  DllartRuntimeMode mode;
+  dllart_mutex_lock();
+  mode = g_state.runtime_mode;
+  dllart_mutex_unlock();
+  return mode;
+}
+
+static char* dllart_copy_sidecar_path_for_call(char** error_out) {
+  char* sidecar_path = NULL;
+
+  dllart_mutex_lock();
+  if (g_state.runtime_mode != DLLART_RUNTIME_MODE_SIDECAR ||
+      g_state.sidecar_path == NULL || g_state.sidecar_path[0] == '\0') {
+    dllart_mutex_unlock();
+    dllart_set_not_initialized(
+        error_out, "Module is not initialized. Call dllart_init first.");
+    return NULL;
+  }
+  sidecar_path = dllart_strdup(g_state.sidecar_path);
+  dllart_mutex_unlock();
+
+  if (sidecar_path == NULL) {
+    dllart_set_error_code(error_out, DLLART_E_OOM,
+                          "Out of memory while preparing sidecar call");
+    return NULL;
+  }
+  return sidecar_path;
+}
+
+static void dllart_buffer_free(DllartByteBuffer* buffer) {
+  if (buffer == NULL) {
+    return;
+  }
+  free(buffer->data);
+  buffer->data = NULL;
+  buffer->len = 0;
+}
+
+static char* dllart_buffer_to_cstring(const DllartByteBuffer* buffer,
+                                      char** error_out) {
+  const size_t len = buffer != NULL ? buffer->len : 0;
+  const uint8_t* data = buffer != NULL ? buffer->data : NULL;
+  char* out = (char*)malloc(len + 1);
+  if (out == NULL) {
+    dllart_set_error_code(error_out, DLLART_E_OOM,
+                          "Out of memory while decoding sidecar response");
+    return NULL;
+  }
+  if (len > 0 && data != NULL) {
+    memcpy(out, data, len);
+  }
+  out[len] = '\0';
+  return out;
+}
+
+#if defined(_WIN32)
+static int dllart_sidecar_exec(const char* op,
+                               const char* const* args,
+                               size_t arg_count,
+                               const uint8_t* input,
+                               size_t input_len,
+                               DllartByteBuffer* output_out,
+                               char** error_out) {
+  (void)op;
+  (void)args;
+  (void)arg_count;
+  (void)input;
+  (void)input_len;
+  if (output_out != NULL) {
+    output_out->data = NULL;
+    output_out->len = 0;
+  }
+  return dllart_set_error(
+      error_out, "Sidecar runtime mode is not supported on Windows");
+}
+#else
+static int dllart_sidecar_write_all(int fd,
+                                    const uint8_t* data,
+                                    size_t length,
+                                    char** error_out) {
+  size_t written = 0;
+  while (written < length) {
+    ssize_t chunk = write(fd, data + written, length - written);
+    if (chunk < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return dllart_set_error_with_context(
+          error_out, "Failed to write sidecar stdin", strerror(errno));
+    }
+    written += (size_t)chunk;
+  }
+  return 0;
+}
+
+static int dllart_sidecar_read_all(int fd,
+                                   DllartByteBuffer* output_out,
+                                   char** error_out) {
+  size_t length = 0;
+  size_t capacity = 0;
+  uint8_t* data = NULL;
+  uint8_t temp[4096];
+
+  for (;;) {
+    ssize_t read_bytes = read(fd, temp, sizeof(temp));
+    if (read_bytes == 0) {
+      break;
+    }
+    if (read_bytes < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      free(data);
+      return dllart_set_error_with_context(
+          error_out, "Failed to read sidecar output", strerror(errno));
+    }
+
+    const size_t chunk = (size_t)read_bytes;
+    if (length + chunk > capacity) {
+      size_t next_capacity = capacity == 0 ? 4096 : capacity;
+      while (next_capacity < length + chunk) {
+        next_capacity *= 2;
+      }
+      uint8_t* next = (uint8_t*)realloc(data, next_capacity);
+      if (next == NULL) {
+        free(data);
+        return dllart_set_error_code(
+            error_out, DLLART_E_OOM,
+            "Out of memory while reading sidecar output");
+      }
+      data = next;
+      capacity = next_capacity;
+    }
+    memcpy(data + length, temp, chunk);
+    length += chunk;
+  }
+
+  output_out->data = data;
+  output_out->len = length;
+  return 0;
+}
+
+static int dllart_sidecar_exec(const char* op,
+                               const char* const* args,
+                               size_t arg_count,
+                               const uint8_t* input,
+                               size_t input_len,
+                               DllartByteBuffer* output_out,
+                               char** error_out) {
+  if (output_out == NULL) {
+    return dllart_set_invalid_argument(error_out,
+                                       "output_out cannot be null");
+  }
+  output_out->data = NULL;
+  output_out->len = 0;
+
+  char* sidecar_path = dllart_copy_sidecar_path_for_call(error_out);
+  if (sidecar_path == NULL) {
+    return -1;
+  }
+
+  int stdin_pipe[2] = {-1, -1};
+  int output_pipe[2] = {-1, -1};
+  int status = -1;
+  DllartByteBuffer output = {0};
+
+  if (pipe(stdin_pipe) != 0) {
+    free(sidecar_path);
+    return dllart_set_error_with_context(
+        error_out, "Failed to create sidecar stdin pipe", strerror(errno));
+  }
+  if (pipe(output_pipe) != 0) {
+    close(stdin_pipe[0]);
+    close(stdin_pipe[1]);
+    free(sidecar_path);
+    return dllart_set_error_with_context(
+        error_out, "Failed to create sidecar output pipe", strerror(errno));
+  }
+
+  const size_t argv_count = arg_count + 3;
+  char** argv = (char**)calloc(argv_count, sizeof(char*));
+  if (argv == NULL) {
+    close(stdin_pipe[0]);
+    close(stdin_pipe[1]);
+    close(output_pipe[0]);
+    close(output_pipe[1]);
+    free(sidecar_path);
+    return dllart_set_error_code(error_out, DLLART_E_OOM,
+                                 "Out of memory while preparing sidecar call");
+  }
+  argv[0] = sidecar_path;
+  argv[1] = (char*)op;
+  for (size_t i = 0; i < arg_count; i++) {
+    argv[2 + i] = (char*)args[i];
+  }
+  argv[2 + arg_count] = NULL;
+
+  pid_t pid = fork();
+  if (pid < 0) {
+    free(argv);
+    close(stdin_pipe[0]);
+    close(stdin_pipe[1]);
+    close(output_pipe[0]);
+    close(output_pipe[1]);
+    free(sidecar_path);
+    return dllart_set_error_with_context(
+        error_out, "Failed to fork sidecar process", strerror(errno));
+  }
+
+  if (pid == 0) {
+    (void)dup2(stdin_pipe[0], STDIN_FILENO);
+    (void)dup2(output_pipe[1], STDOUT_FILENO);
+    (void)dup2(output_pipe[1], STDERR_FILENO);
+
+    close(stdin_pipe[0]);
+    close(stdin_pipe[1]);
+    close(output_pipe[0]);
+    close(output_pipe[1]);
+
+    execv(sidecar_path, argv);
+    {
+      const char* msg = "execv(sidecar) failed";
+      (void)write(STDERR_FILENO, msg, strlen(msg));
+      _exit(127);
+    }
+  }
+
+  free(argv);
+  close(stdin_pipe[0]);
+  close(output_pipe[1]);
+
+  if (input_len > 0 && input != NULL) {
+    if (dllart_sidecar_write_all(stdin_pipe[1], input, input_len, error_out) !=
+        0) {
+      close(stdin_pipe[1]);
+      close(output_pipe[0]);
+      (void)waitpid(pid, NULL, 0);
+      free(sidecar_path);
+      return -1;
+    }
+  }
+  close(stdin_pipe[1]);
+
+  if (dllart_sidecar_read_all(output_pipe[0], &output, error_out) != 0) {
+    close(output_pipe[0]);
+    (void)waitpid(pid, NULL, 0);
+    free(sidecar_path);
+    return -1;
+  }
+  close(output_pipe[0]);
+
+  int wait_status = 0;
+  while (waitpid(pid, &wait_status, 0) < 0) {
+    if (errno == EINTR) {
+      continue;
+    }
+    dllart_buffer_free(&output);
+    free(sidecar_path);
+    return dllart_set_error_with_context(
+        error_out, "Failed to wait for sidecar process", strerror(errno));
+  }
+  free(sidecar_path);
+
+  if (!WIFEXITED(wait_status) || WEXITSTATUS(wait_status) != 0) {
+    char* detail = dllart_buffer_to_cstring(&output, NULL);
+    const int rc = dllart_set_error_with_context(
+        error_out, "Sidecar process failed", detail);
+    free(detail);
+    dllart_buffer_free(&output);
+    return rc;
+  }
+
+  *output_out = output;
+  return 0;
+}
+#endif
+
+static int dllart_parse_i64_sidecar_result(const DllartByteBuffer* buffer,
+                                           int64_t* result_out,
+                                           char** error_out) {
+  char* text = dllart_buffer_to_cstring(buffer, error_out);
+  if (text == NULL) {
+    return -1;
+  }
+
+  char* start = text;
+  while (*start != '\0' && isspace((unsigned char)*start)) {
+    start++;
+  }
+  if (*start == '\0') {
+    free(text);
+    return dllart_set_error(error_out, "Sidecar returned empty integer result");
+  }
+  char* end = NULL;
+  errno = 0;
+  long long parsed = strtoll(start, &end, 10);
+  while (end != NULL && *end != '\0' && isspace((unsigned char)*end)) {
+    end++;
+  }
+  if (errno != 0 || end == start || (end != NULL && *end != '\0')) {
+    free(text);
+    return dllart_set_error(error_out, "Cannot parse sidecar integer result");
+  }
+  free(text);
+
+  if (result_out != NULL) {
+    *result_out = (int64_t)parsed;
+  }
+  return 0;
+}
+
+static int dllart_parse_f64_sidecar_result(const DllartByteBuffer* buffer,
+                                           double* result_out,
+                                           char** error_out) {
+  char* text = dllart_buffer_to_cstring(buffer, error_out);
+  if (text == NULL) {
+    return -1;
+  }
+
+  char* start = text;
+  while (*start != '\0' && isspace((unsigned char)*start)) {
+    start++;
+  }
+  if (*start == '\0') {
+    free(text);
+    return dllart_set_error(error_out, "Sidecar returned empty double result");
+  }
+  char* end = NULL;
+  errno = 0;
+  double parsed = strtod(start, &end);
+  while (end != NULL && *end != '\0' && isspace((unsigned char)*end)) {
+    end++;
+  }
+  if (errno != 0 || end == start || (end != NULL && *end != '\0')) {
+    free(text);
+    return dllart_set_error(error_out, "Cannot parse sidecar double result");
+  }
+  free(text);
+
+  if (result_out != NULL) {
+    *result_out = parsed;
+  }
+  return 0;
+}
+
+static void dllart_annotate_sidecar_index_error(char** error_out,
+                                                 int32_t method_id) {
+  if (error_out == NULL || *error_out == NULL) {
+    return;
+  }
+  const char* base = *error_out;
+  const size_t size = strlen(base) + 64;
+  char* combined = (char*)malloc(size);
+  if (combined == NULL) {
+    return;
+  }
+  snprintf(combined, size, "id=%d; %s", (int)method_id, base);
+  free(*error_out);
+  *error_out = combined;
+}
+
+static int dllart_sidecar_call_json_common(const char* op,
+                                           const char* method,
+                                           const char* payload,
+                                           char** result_json_out,
+                                           char** error_out) {
+  DllartByteBuffer output = {0};
+  const char* args[1];
+  size_t arg_count = 0;
+  if (method != NULL) {
+    args[0] = method;
+    arg_count = 1;
+  }
+
+  const uint8_t* payload_bytes = (const uint8_t*)payload;
+  const size_t payload_len = payload != NULL ? strlen(payload) : 0;
+  if (dllart_sidecar_exec(op,
+                          args,
+                          arg_count,
+                          payload_bytes,
+                          payload_len,
+                          &output,
+                          error_out) != 0) {
+    return -1;
+  }
+
+  if (output.len > (size_t)DLLART_JSON_OUT_MAX_BYTES) {
+    dllart_buffer_free(&output);
+    return dllart_set_limit_exceeded(
+        error_out, "result exceeds configured json_out_max_bytes");
+  }
+
+  char* out = dllart_buffer_to_cstring(&output, error_out);
+  dllart_buffer_free(&output);
+  if (out == NULL) {
+    return -1;
+  }
+  if (result_json_out != NULL) {
+    *result_json_out = out;
+  } else {
+    free(out);
+  }
+  return 0;
+}
+
+static int dllart_sidecar_call_i64_common(const char* op,
+                                          const char* arg0,
+                                          const char* arg1,
+                                          const char* arg2,
+                                          const char* arg3,
+                                          const char* arg4,
+                                          int64_t* result_out,
+                                          char** error_out) {
+  const char* args[5];
+  size_t count = 0;
+  if (arg0 != NULL) {
+    args[count++] = arg0;
+  }
+  if (arg1 != NULL) {
+    args[count++] = arg1;
+  }
+  if (arg2 != NULL) {
+    args[count++] = arg2;
+  }
+  if (arg3 != NULL) {
+    args[count++] = arg3;
+  }
+  if (arg4 != NULL) {
+    args[count++] = arg4;
+  }
+
+  DllartByteBuffer output = {0};
+  if (dllart_sidecar_exec(op, args, count, NULL, 0, &output, error_out) != 0) {
+    return -1;
+  }
+  const int rc = dllart_parse_i64_sidecar_result(&output, result_out, error_out);
+  dllart_buffer_free(&output);
+  return rc;
+}
+
+static int dllart_sidecar_call_f64_common(const char* op,
+                                          const char* arg0,
+                                          const char* arg1,
+                                          const char* arg2,
+                                          const char* arg3,
+                                          const char* arg4,
+                                          double* result_out,
+                                          char** error_out) {
+  const char* args[5];
+  size_t count = 0;
+  if (arg0 != NULL) {
+    args[count++] = arg0;
+  }
+  if (arg1 != NULL) {
+    args[count++] = arg1;
+  }
+  if (arg2 != NULL) {
+    args[count++] = arg2;
+  }
+  if (arg3 != NULL) {
+    args[count++] = arg3;
+  }
+  if (arg4 != NULL) {
+    args[count++] = arg4;
+  }
+
+  DllartByteBuffer output = {0};
+  if (dllart_sidecar_exec(op, args, count, NULL, 0, &output, error_out) != 0) {
+    return -1;
+  }
+  const int rc = dllart_parse_f64_sidecar_result(&output, result_out, error_out);
+  dllart_buffer_free(&output);
+  return rc;
+}
+
+static int dllart_sidecar_call_bytes_common(const char* op,
+                                            const char* arg0,
+                                            const uint8_t* args,
+                                            int32_t args_len,
+                                            uint8_t** result_out,
+                                            int32_t* result_len_out,
+                                            char** error_out) {
+  DllartByteBuffer output = {0};
+  const char* op_args[1] = {arg0};
+  if (dllart_sidecar_exec(op,
+                          op_args,
+                          1,
+                          args,
+                          (size_t)args_len,
+                          &output,
+                          error_out) != 0) {
+    return -1;
+  }
+
+  if (output.len > (size_t)DLLART_BYTES_OUT_MAX_BYTES) {
+    dllart_buffer_free(&output);
+    return dllart_set_limit_exceeded(
+        error_out, "result exceeds configured bytes_out_max_bytes");
+  }
+  if (output.len > (size_t)INT32_MAX) {
+    dllart_buffer_free(&output);
+    return dllart_set_limit_exceeded(error_out,
+                                     "Result bytes length is out of range");
+  }
+
+  const int32_t out_len = (int32_t)output.len;
+  uint8_t* out = NULL;
+  if (output.len > 0) {
+    out = (uint8_t*)malloc(output.len);
+    if (out == NULL) {
+      dllart_buffer_free(&output);
+      return dllart_set_error_code(
+          error_out, DLLART_E_OOM, "Out of memory while copying result bytes");
+    }
+    memcpy(out, output.data, output.len);
+  } else {
+    out = (uint8_t*)malloc(1);
+    if (out == NULL) {
+      dllart_buffer_free(&output);
+      return dllart_set_error_code(
+          error_out, DLLART_E_OOM,
+          "Out of memory while allocating empty result");
+    }
+  }
+  dllart_buffer_free(&output);
+
+  if (result_out != NULL) {
+    *result_out = out;
+  } else {
+    free(out);
+  }
+  if (result_len_out != NULL) {
+    *result_len_out = out_len;
+  }
+  return 0;
+}
+
+static int dllart_verify_sidecar_runtime(char** error_out) {
+  DllartByteBuffer output = {0};
+  if (dllart_sidecar_exec("ping", NULL, 0, NULL, 0, &output, error_out) != 0) {
+    return -1;
+  }
+  char* text = dllart_buffer_to_cstring(&output, error_out);
+  dllart_buffer_free(&output);
+  if (text == NULL) {
+    return -1;
+  }
+
+  char* start = text;
+  while (*start != '\0' && isspace((unsigned char)*start)) {
+    start++;
+  }
+  char* end = start + strlen(start);
+  while (end > start && isspace((unsigned char)end[-1])) {
+    end--;
+  }
+  *end = '\0';
+  const bool ok = strcmp(start, "ok") == 0;
+  free(text);
+  if (!ok) {
+    return dllart_set_error(
+        error_out, "Sidecar health check failed: expected `ok` response");
+  }
+  return 0;
+}
+
 int dllart_abi_version(void) {
   return 1;
 }
@@ -2155,14 +2936,102 @@ int dllart_init(const char* runtime_path, char** error_out) {
   }
 
   dllart_mutex_lock();
+  int status = -1;
+  char* inprocess_error = NULL;
+  const DllartRuntimePreference preference = dllart_runtime_preference();
 
-  int status = dllart_open_runtime(runtime_path, error_out);
+  if (g_state.runtime_mode == DLLART_RUNTIME_MODE_SIDECAR &&
+      preference != DLLART_RUNTIME_PREF_INPROCESS) {
+    dllart_mutex_unlock();
+    return dllart_verify_sidecar_runtime(error_out);
+  }
+
+  if (g_state.runtime_mode == DLLART_RUNTIME_MODE_IN_PROCESS &&
+      preference != DLLART_RUNTIME_PREF_SIDECAR) {
+    status = dllart_open_runtime(runtime_path, error_out);
+    if (status == 0) {
+      status = dllart_initialize_vm(error_out);
+    }
+    if (status == 0) {
+      status = dllart_ensure_isolate_pool(error_out);
+    }
+    if (status == 0) {
+      g_state.runtime_mode = DLLART_RUNTIME_MODE_IN_PROCESS;
+      dllart_release_sidecar_path();
+      dllart_mutex_unlock();
+      return 0;
+    }
+    (void)dllart_teardown_state(NULL);
+    dllart_mutex_unlock();
+    return status;
+  }
+
+  if (preference == DLLART_RUNTIME_PREF_SIDECAR) {
+    if (g_state.runtime_mode == DLLART_RUNTIME_MODE_IN_PROCESS ||
+        g_state.runtime_handle != NULL || g_state.isolate_count > 0) {
+      (void)dllart_teardown_state(NULL);
+    }
+    status = dllart_open_sidecar(error_out);
+    if (status == 0) {
+      dllart_mutex_unlock();
+      status = dllart_verify_sidecar_runtime(error_out);
+      dllart_mutex_lock();
+    }
+    if (status != 0) {
+      (void)dllart_teardown_state(NULL);
+    }
+    dllart_mutex_unlock();
+    return status;
+  }
+
+  status = dllart_open_runtime(runtime_path, error_out);
   if (status == 0) {
     status = dllart_initialize_vm(error_out);
   }
   if (status == 0) {
     status = dllart_ensure_isolate_pool(error_out);
   }
+  if (status == 0) {
+    g_state.runtime_mode = DLLART_RUNTIME_MODE_IN_PROCESS;
+    dllart_release_sidecar_path();
+    dllart_mutex_unlock();
+    return 0;
+  }
+
+  if (preference == DLLART_RUNTIME_PREF_AUTO) {
+    if (error_out != NULL && *error_out != NULL) {
+      inprocess_error = *error_out;
+      *error_out = NULL;
+    }
+    (void)dllart_teardown_state(NULL);
+
+    status = dllart_open_sidecar(error_out);
+    if (status == 0) {
+      dllart_mutex_unlock();
+      status = dllart_verify_sidecar_runtime(error_out);
+      dllart_mutex_lock();
+    }
+    if (status == 0) {
+      free(inprocess_error);
+      dllart_mutex_unlock();
+      return 0;
+    }
+
+    if (inprocess_error != NULL && error_out != NULL && *error_out != NULL) {
+      const char* sidecar_error = *error_out;
+      const size_t size = strlen(inprocess_error) + strlen(sidecar_error) + 80;
+      char* combined = (char*)malloc(size);
+      if (combined != NULL) {
+        snprintf(combined, size,
+                 "In-process runtime failed: %s; sidecar fallback failed: %s",
+                 inprocess_error, sidecar_error);
+        free(*error_out);
+        *error_out = combined;
+      }
+    }
+    free(inprocess_error);
+  }
+
   if (status != 0) {
     (void)dllart_teardown_state(NULL);
   }
@@ -2209,6 +3078,10 @@ int dllart_call_json(const char* method,
                                      "args_json",
                                      error_out) != 0) {
     return -1;
+  }
+  if (dllart_runtime_mode_snapshot() == DLLART_RUNTIME_MODE_SIDECAR) {
+    return dllart_sidecar_call_json_common(
+        "json", method, args_json, result_json_out, error_out);
   }
 
   DllartIsolateState* state = NULL;
@@ -2332,6 +3205,10 @@ int dllart_call_json_batch(const char* batch_json,
                                      "batch_json",
                                      error_out) != 0) {
     return -1;
+  }
+  if (dllart_runtime_mode_snapshot() == DLLART_RUNTIME_MODE_SIDECAR) {
+    return dllart_sidecar_call_json_common(
+        "json_batch", NULL, batch_json, result_json_out, error_out);
   }
 
   DllartIsolateState* state = NULL;
@@ -2467,6 +3344,10 @@ int dllart_call_json_raw(const char* method,
                                      error_out) != 0) {
     return -1;
   }
+  if (dllart_runtime_mode_snapshot() == DLLART_RUNTIME_MODE_SIDECAR) {
+    return dllart_sidecar_call_json_common(
+        "json_raw", method, args_json, result_json_out, error_out);
+  }
 
   DllartIsolateState* state = NULL;
   dllart_mutex_lock();
@@ -2590,6 +3471,14 @@ int dllart_call_i64_2(const char* method,
   if (method == NULL || method[0] == '\0') {
     return dllart_set_invalid_argument(error_out, "Method cannot be null or empty");
   }
+  if (dllart_runtime_mode_snapshot() == DLLART_RUNTIME_MODE_SIDECAR) {
+    char a_text[64];
+    char b_text[64];
+    snprintf(a_text, sizeof(a_text), "%lld", (long long)a);
+    snprintf(b_text, sizeof(b_text), "%lld", (long long)b);
+    return dllart_sidecar_call_i64_common(
+        "i64_2", method, a_text, b_text, NULL, NULL, result_out, error_out);
+  }
 
   DllartIsolateState* state = NULL;
   dllart_mutex_lock();
@@ -2698,6 +3587,26 @@ int dllart_call_i64_2_index(int32_t method_id,
 
   if (method_id < 0) {
     return dllart_set_invalid_argument(error_out, "method_id cannot be negative");
+  }
+  if (dllart_runtime_mode_snapshot() == DLLART_RUNTIME_MODE_SIDECAR) {
+    char method_id_text[32];
+    char a_text[64];
+    char b_text[64];
+    snprintf(method_id_text, sizeof(method_id_text), "%d", (int)method_id);
+    snprintf(a_text, sizeof(a_text), "%lld", (long long)a);
+    snprintf(b_text, sizeof(b_text), "%lld", (long long)b);
+    status = dllart_sidecar_call_i64_common("i64_2_index",
+                                            method_id_text,
+                                            a_text,
+                                            b_text,
+                                            NULL,
+                                            NULL,
+                                            result_out,
+                                            error_out);
+    if (status != 0) {
+      dllart_annotate_sidecar_index_error(error_out, method_id);
+    }
+    return status;
   }
 
   DllartIsolateState* state = NULL;
@@ -2818,6 +3727,18 @@ int dllart_call_i64_4(const char* method,
 
   if (method == NULL || method[0] == '\0') {
     return dllart_set_invalid_argument(error_out, "Method cannot be null or empty");
+  }
+  if (dllart_runtime_mode_snapshot() == DLLART_RUNTIME_MODE_SIDECAR) {
+    char a_text[64];
+    char b_text[64];
+    char c_text[64];
+    char d_text[64];
+    snprintf(a_text, sizeof(a_text), "%lld", (long long)a);
+    snprintf(b_text, sizeof(b_text), "%lld", (long long)b);
+    snprintf(c_text, sizeof(c_text), "%lld", (long long)c);
+    snprintf(d_text, sizeof(d_text), "%lld", (long long)d);
+    return dllart_sidecar_call_i64_common(
+        "i64_4", method, a_text, b_text, c_text, d_text, result_out, error_out);
   }
 
   DllartIsolateState* state = NULL;
@@ -2941,6 +3862,30 @@ int dllart_call_i64_4_index(int32_t method_id,
 
   if (method_id < 0) {
     return dllart_set_invalid_argument(error_out, "method_id cannot be negative");
+  }
+  if (dllart_runtime_mode_snapshot() == DLLART_RUNTIME_MODE_SIDECAR) {
+    char method_id_text[32];
+    char a_text[64];
+    char b_text[64];
+    char c_text[64];
+    char d_text[64];
+    snprintf(method_id_text, sizeof(method_id_text), "%d", (int)method_id);
+    snprintf(a_text, sizeof(a_text), "%lld", (long long)a);
+    snprintf(b_text, sizeof(b_text), "%lld", (long long)b);
+    snprintf(c_text, sizeof(c_text), "%lld", (long long)c);
+    snprintf(d_text, sizeof(d_text), "%lld", (long long)d);
+    status = dllart_sidecar_call_i64_common("i64_4_index",
+                                            method_id_text,
+                                            a_text,
+                                            b_text,
+                                            c_text,
+                                            d_text,
+                                            result_out,
+                                            error_out);
+    if (status != 0) {
+      dllart_annotate_sidecar_index_error(error_out, method_id);
+    }
+    return status;
   }
 
   DllartIsolateState* state = NULL;
@@ -3069,6 +4014,14 @@ int dllart_call_f64_2(const char* method,
   if (method == NULL || method[0] == '\0') {
     return dllart_set_invalid_argument(error_out, "Method cannot be null or empty");
   }
+  if (dllart_runtime_mode_snapshot() == DLLART_RUNTIME_MODE_SIDECAR) {
+    char a_text[64];
+    char b_text[64];
+    snprintf(a_text, sizeof(a_text), "%.17g", a);
+    snprintf(b_text, sizeof(b_text), "%.17g", b);
+    return dllart_sidecar_call_f64_common(
+        "f64_2", method, a_text, b_text, NULL, NULL, result_out, error_out);
+  }
 
   DllartIsolateState* state = NULL;
   dllart_mutex_lock();
@@ -3177,6 +4130,26 @@ int dllart_call_f64_2_index(int32_t method_id,
 
   if (method_id < 0) {
     return dllart_set_invalid_argument(error_out, "method_id cannot be negative");
+  }
+  if (dllart_runtime_mode_snapshot() == DLLART_RUNTIME_MODE_SIDECAR) {
+    char method_id_text[32];
+    char a_text[64];
+    char b_text[64];
+    snprintf(method_id_text, sizeof(method_id_text), "%d", (int)method_id);
+    snprintf(a_text, sizeof(a_text), "%.17g", a);
+    snprintf(b_text, sizeof(b_text), "%.17g", b);
+    status = dllart_sidecar_call_f64_common("f64_2_index",
+                                            method_id_text,
+                                            a_text,
+                                            b_text,
+                                            NULL,
+                                            NULL,
+                                            result_out,
+                                            error_out);
+    if (status != 0) {
+      dllart_annotate_sidecar_index_error(error_out, method_id);
+    }
+    return status;
   }
 
   DllartIsolateState* state = NULL;
@@ -3297,6 +4270,18 @@ int dllart_call_f64_4(const char* method,
 
   if (method == NULL || method[0] == '\0') {
     return dllart_set_invalid_argument(error_out, "Method cannot be null or empty");
+  }
+  if (dllart_runtime_mode_snapshot() == DLLART_RUNTIME_MODE_SIDECAR) {
+    char a_text[64];
+    char b_text[64];
+    char c_text[64];
+    char d_text[64];
+    snprintf(a_text, sizeof(a_text), "%.17g", a);
+    snprintf(b_text, sizeof(b_text), "%.17g", b);
+    snprintf(c_text, sizeof(c_text), "%.17g", c);
+    snprintf(d_text, sizeof(d_text), "%.17g", d);
+    return dllart_sidecar_call_f64_common(
+        "f64_4", method, a_text, b_text, c_text, d_text, result_out, error_out);
   }
 
   DllartIsolateState* state = NULL;
@@ -3421,6 +4406,30 @@ int dllart_call_f64_4_index(int32_t method_id,
 
   if (method_id < 0) {
     return dllart_set_invalid_argument(error_out, "method_id cannot be negative");
+  }
+  if (dllart_runtime_mode_snapshot() == DLLART_RUNTIME_MODE_SIDECAR) {
+    char method_id_text[32];
+    char a_text[64];
+    char b_text[64];
+    char c_text[64];
+    char d_text[64];
+    snprintf(method_id_text, sizeof(method_id_text), "%d", (int)method_id);
+    snprintf(a_text, sizeof(a_text), "%.17g", a);
+    snprintf(b_text, sizeof(b_text), "%.17g", b);
+    snprintf(c_text, sizeof(c_text), "%.17g", c);
+    snprintf(d_text, sizeof(d_text), "%.17g", d);
+    status = dllart_sidecar_call_f64_common("f64_4_index",
+                                            method_id_text,
+                                            a_text,
+                                            b_text,
+                                            c_text,
+                                            d_text,
+                                            result_out,
+                                            error_out);
+    if (status != 0) {
+      dllart_annotate_sidecar_index_error(error_out, method_id);
+    }
+    return status;
   }
 
   DllartIsolateState* state = NULL;
@@ -3563,6 +4572,10 @@ int dllart_call_bytes(const char* method,
   if ((size_t)args_len > (size_t)DLLART_BYTES_IN_MAX_BYTES) {
     return dllart_set_limit_exceeded(
         error_out, "args exceeds configured bytes_in_max_bytes");
+  }
+  if (dllart_runtime_mode_snapshot() == DLLART_RUNTIME_MODE_SIDECAR) {
+    return dllart_sidecar_call_bytes_common(
+        "bytes", method, args, args_len, result_out, result_len_out, error_out);
   }
 
   DllartIsolateState* state = NULL;
@@ -3736,6 +4749,21 @@ int dllart_call_bytes_index(int32_t method_id,
   if ((size_t)args_len > (size_t)DLLART_BYTES_IN_MAX_BYTES) {
     return dllart_set_limit_exceeded(
         error_out, "args exceeds configured bytes_in_max_bytes");
+  }
+  if (dllart_runtime_mode_snapshot() == DLLART_RUNTIME_MODE_SIDECAR) {
+    char method_id_text[32];
+    snprintf(method_id_text, sizeof(method_id_text), "%d", (int)method_id);
+    status = dllart_sidecar_call_bytes_common("bytes_index",
+                                              method_id_text,
+                                              args,
+                                              args_len,
+                                              result_out,
+                                              result_len_out,
+                                              error_out);
+    if (status != 0) {
+      dllart_annotate_sidecar_index_error(error_out, method_id);
+    }
+    return status;
   }
 
   DllartIsolateState* state = NULL;

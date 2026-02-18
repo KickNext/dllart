@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
 
+import 'runtime_support.dart';
+
 final String _repoRoot = p.normalize(Directory.current.path);
 
 Future<ProcessResult> _runCli(
@@ -198,6 +200,12 @@ void main() {
         );
         return;
       }
+      final inprocessSupported = !shouldSkipRuntimeDependentLinuxTests();
+      if (Platform.isLinux && !inprocessSupported) {
+        stderr.writeln(
+          'Runtime lifecycle stress: Linux runtime is not dlopen-compatible for this SDK build; inprocess checks will be skipped.',
+        );
+      }
 
       final tempRoot = await Directory.systemTemp.createTemp(
         'dllart_runtime_stress_',
@@ -255,13 +263,63 @@ void main() {
         reason: '${compiled.stderr}\n${compiled.stdout}',
       );
 
-      final env = Map<String, String>.from(Platform.environment)
-        ..['DLLART_ISOLATE_POOL_SIZE'] = '4';
-      final ran = await Process.run(stressBinPath, <String>[
-        libraryPath,
-      ], environment: env);
-      expect(ran.exitCode, 0, reason: '${ran.stderr}\n${ran.stdout}');
-      expect(ran.stdout.toString(), contains('runtime_lifecycle_stress_ok'));
+      final runtimeCases = <({String name, Map<String, String> env})>[
+        (
+          name: 'auto(default)',
+          env: <String, String>{},
+        ),
+        (
+          name: 'auto+helper-thread',
+          env: <String, String>{'DLLART_FORCE_HELPER_THREAD': '1'},
+        ),
+        (
+          name: 'sidecar',
+          env: <String, String>{'DLLART_RUNTIME_MODE': 'sidecar'},
+        ),
+        (
+          name: 'sidecar+helper-thread',
+          env: <String, String>{
+            'DLLART_RUNTIME_MODE': 'sidecar',
+            'DLLART_FORCE_HELPER_THREAD': '1',
+          },
+        ),
+        if (inprocessSupported)
+          (
+            name: 'inprocess',
+            env: <String, String>{'DLLART_RUNTIME_MODE': 'inprocess'},
+          ),
+        if (inprocessSupported)
+          (
+            name: 'inprocess+helper-thread',
+            env: <String, String>{
+              'DLLART_RUNTIME_MODE': 'inprocess',
+              'DLLART_FORCE_HELPER_THREAD': '1',
+            },
+          ),
+      ];
+
+      for (final testCase in runtimeCases) {
+        final env = Map<String, String>.from(Platform.environment)
+          ..['DLLART_ISOLATE_POOL_SIZE'] = '4'
+          ..addAll(testCase.env);
+        final ran = await Process.run(
+          stressBinPath,
+          <String>[libraryPath],
+          environment: env,
+        );
+        expect(
+          ran.exitCode,
+          0,
+          reason:
+              '[${testCase.name}] ${ran.stderr}\n${ran.stdout}',
+        );
+        expect(
+          ran.stdout.toString(),
+          contains('runtime_lifecycle_stress_ok'),
+          reason: '[${testCase.name}] ${ran.stderr}\n${ran.stdout}',
+        );
+      }
     },
+    timeout: const Timeout(Duration(minutes: 5)),
   );
 }
