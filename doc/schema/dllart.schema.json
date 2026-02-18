@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kicknext/dllart/blob/main/doc/schema/dllart.schema.json",
+  "title": "dllart configuration",
+  "description": "Schema for dllart.json configuration consumed by dllart CLI commands.",
+  "$comment": "artifact.json build metadata (effective_target/mobile_outputs/bridge/verification) is generated at build time and validated by doctor.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "source"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Module name used in generated C ABI symbols and output naming."
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to Dart source file with @DllartExport top-level functions."
+    },
+    "output": {
+      "type": "string",
+      "minLength": 1,
+      "default": "build",
+      "description": "Output directory for generated artifacts."
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "macos-arm64",
+          "macos-x64",
+          "linux-x64",
+          "windows-x64"
+        ]
+      },
+      "default": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "windows-x64"
+      ],
+      "description": "Target matrix used by workflow generation and validation."
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "json_in_max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1048576,
+          "description": "Maximum JSON request payload size in bytes."
+        },
+        "json_out_max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 8388608,
+          "description": "Maximum JSON response payload size in bytes."
+        },
+        "bytes_in_max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 4194304,
+          "description": "Maximum bytes request payload size in bytes."
+        },
+        "bytes_out_max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 16777216,
+          "description": "Maximum bytes response payload size in bytes."
+        },
+        "method_cache_max_entries": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 2048,
+          "description": "Maximum number of cached method handles inside native runtime."
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": [
+            "full",
+            "slim"
+          ],
+          "default": "full",
+          "description": "Runtime packaging profile metadata. Does not currently change embedded dart:io availability."
+        }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": [
+            "text",
+            "json"
+          ],
+          "default": "text",
+          "description": "CLI diagnostics output format for non --json command mode."
+        },
+        "level": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warn",
+            "info"
+          ],
+          "default": "info",
+          "description": "CLI diagnostics verbosity level for non --json command mode."
+        }
+      }
+    },
+    "protobuf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proto"
+      ],
+      "properties": {
+        "proto": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path to the root .proto file."
+        },
+        "out": {
+          "type": "string",
+          "minLength": 1,
+          "default": "lib/generated/proto",
+          "description": "Output directory for generated Dart protobuf files."
+        },
+        "includes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Additional protoc include roots."
+        },
+        "grpc": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use grpc mode for Dart generation."
+        },
+        "protoc": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Custom protoc executable path or name."
+        }
+      }
+    }
+  }
+}

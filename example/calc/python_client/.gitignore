@@ -1,0 +1,9 @@
+# Python local cache/env
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Local editor/OS noise
+.DS_Store

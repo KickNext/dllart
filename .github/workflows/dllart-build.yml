@@ -1,0 +1,92 @@
+name: DLLART CI
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/**'
+      - 'analysis_options.yaml'
+      - 'bin/**'
+      - 'example/**'
+      - 'lib/**'
+      - 'native/**'
+      - 'pubspec.yaml'
+      - 'scripts/**'
+      - 'test/**'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'analysis_options.yaml'
+      - 'bin/**'
+      - 'example/**'
+      - 'lib/**'
+      - 'native/**'
+      - 'pubspec.yaml'
+      - 'scripts/**'
+      - 'test/**'
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+
+      - name: Install Clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Resolve deps
+        run: dart pub get
+
+      - name: Analyze
+        run: dart analyze
+
+      - name: Test
+        run: dart test
+
+      - name: Smoke test
+        run: scripts/smoke_test.sh
+
+  build:
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+
+      - name: Install Clang (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Install LLVM (Windows)
+        if: runner.os == 'Windows'
+        run: choco install llvm --yes --no-progress
+
+      - name: Add LLVM to PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append'
+
+      - name: Resolve deps
+        run: dart pub get
+
+      - name: Build dllart module
+        run: dart run dllart build --config example/calc/dllart.json
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dllart-${{ runner.os }}
+          path: example/calc/build/calc/**

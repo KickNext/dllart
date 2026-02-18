@@ -1,0 +1,10 @@
+# Local C build artifacts
+main
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.dSYM/

@@ -1,0 +1,11 @@
+name: dllart_calc_example
+description: Standalone example module for dllart CLI workflows.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  dllart:
+    path: ../..

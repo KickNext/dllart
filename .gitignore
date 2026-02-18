@@ -1,0 +1,27 @@
+# Dart pub/package manager
+.dart_tool/
+.pub/
+.packages
+pubspec.lock
+
+# Build and coverage outputs
+/build/
+/coverage/
+
+# Example project generated outputs
+/example/**/build/
+/example/**/.dart_tool/
+
+# Local precompiled helper binaries (generated from bin/*.dart)
+/bin/dllart_mcp
+/bin/dllart_mcp.exe
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+*.iml
+
+# Native debug artifacts
+*.dSYM/
+*.stackdump

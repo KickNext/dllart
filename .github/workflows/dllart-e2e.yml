@@ -1,0 +1,189 @@
+name: DLLART E2E
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/**'
+      - 'analysis_options.yaml'
+      - 'bin/**'
+      - 'example/**'
+      - 'lib/**'
+      - 'native/**'
+      - 'pubspec.yaml'
+      - 'scripts/**'
+      - 'test/**'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'analysis_options.yaml'
+      - 'bin/**'
+      - 'example/**'
+      - 'lib/**'
+      - 'native/**'
+      - 'pubspec.yaml'
+      - 'scripts/**'
+      - 'test/**'
+
+jobs:
+  e2e-unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+
+      - name: Install Clang (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Resolve deps
+        run: dart pub get
+
+      - name: Static checks
+        run: dart analyze
+
+      - name: Test suite
+        run: dart test
+
+      - name: Smoke (single module)
+        run: scripts/smoke_test.sh
+
+      - name: Smoke (multi-module)
+        run: scripts/multi_module_smoke.sh
+
+      - name: Build example
+        run: dart run dllart build --config example/calc/dllart.json
+
+      - name: ABI contract (skip rebuild)
+        run: dart run dllart test --config example/calc/dllart.json --skip-build --json
+
+      - name: Upload example artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dllart-e2e-${{ runner.os }}
+          path: example/calc/build/calc/**
+
+  e2e-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+
+      - name: Install LLVM
+        run: choco install llvm --yes --no-progress
+
+      - name: Add LLVM to PATH
+        shell: pwsh
+        run: '"C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append'
+
+      - name: Resolve deps
+        run: dart pub get
+
+      - name: Static checks
+        run: dart analyze
+
+      - name: Test suite
+        run: dart test
+
+      - name: Build example
+        run: dart run dllart build --config example/calc/dllart.json
+
+      - name: ABI contract (skip rebuild)
+        run: dart run dllart test --config example/calc/dllart.json --skip-build --json
+
+      - name: Upload example artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dllart-e2e-windows
+          path: example/calc/build/calc/**
+
+  mobile-android:
+    needs: [e2e-unix, e2e-windows]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a, x86_64]
+    env:
+      ANDROID_NDK_HOME: ${{ vars.ANDROID_NDK_HOME }}
+      DLLART_ANDROID_GEN_SNAPSHOT_ARM64: ${{ vars.DLLART_ANDROID_GEN_SNAPSHOT_ARM64 }}
+      DLLART_ANDROID_GEN_SNAPSHOT_ARMV7: ${{ vars.DLLART_ANDROID_GEN_SNAPSHOT_ARMV7 }}
+      DLLART_ANDROID_GEN_SNAPSHOT_X64: ${{ vars.DLLART_ANDROID_GEN_SNAPSHOT_X64 }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+
+      - name: Install Clang (Linux)
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Resolve deps
+        run: dart pub get
+
+      - name: Validate Android toolchain inputs
+        run: |
+          if [ -z "${ANDROID_NDK_HOME:-}" ]; then
+            echo "::error::ANDROID_NDK_HOME is required for Android ABI gates."
+            exit 1
+          fi
+
+      - name: Build Android ABI
+        run: |
+          dart run dllart build \
+            --config example/calc/dllart.json \
+            --target=android \
+            --android-abis=${{ matrix.abi }} \
+            --json
+
+      - name: Validate Android artifact exists
+        run: test -f "example/calc/build/calc/lib/android/${{ matrix.abi }}/libcalc.so"
+
+      - name: Ensure no host fallback artifact
+        run: test ! -f "example/calc/build/calc/lib/libcalc.so"
+
+  mobile-ios:
+    needs: [e2e-unix, e2e-windows]
+    runs-on: macos-latest
+    env:
+      DLLART_IOS_GEN_SNAPSHOT_ARM64: ${{ vars.DLLART_IOS_GEN_SNAPSHOT_ARM64 }}
+      DLLART_IOS_GEN_SNAPSHOT_X64: ${{ vars.DLLART_IOS_GEN_SNAPSHOT_X64 }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+
+      - name: Resolve deps
+        run: dart pub get
+
+      - name: Build iOS xcframework
+        run: |
+          dart run dllart build \
+            --config example/calc/dllart.json \
+            --target=ios \
+            --ios-variants=all \
+            --json
+
+      - name: Validate xcframework slices
+        run: |
+          test -d "example/calc/build/calc/lib/ios/calc.xcframework/ios-arm64"
+          test -d "example/calc/build/calc/lib/ios/calc.xcframework/ios-arm64_x86_64-simulator"

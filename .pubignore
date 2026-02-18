@@ -1,0 +1,39 @@
+# Local/generated state
+.dart_tool/
+.pub/
+.packages
+pubspec.lock
+build/
+coverage/
+example/**/build/
+example/**/.dart_tool/
+bin/dllart_mcp
+bin/dllart_mcp.exe
+*.dSYM/
+*.stackdump
+
+# Local editor/OS noise
+.DS_Store
+.idea/
+.vscode/
+*.iml
+
+# Repository-only metadata
+.github/
+AGENT.md
+
+# Development/test/benchmark-only assets
+scripts/
+test/
+
+# Keep docs needed by users, omit internal research/rfc/release process notes
+doc/research/
+doc/rfcs/
+doc/PRODUCTION_READINESS.md
+doc/REQUIRED_IMPROVEMENTS_CHECKLIST.md
+doc/PUBLISHING.md
+
+# Keep high-level example, omit local client scaffolds and bridge internals
+example/calc/native/
+example/calc/c_client/
+example/calc/python_client/

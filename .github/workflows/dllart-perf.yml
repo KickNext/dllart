@@ -1,0 +1,95 @@
+name: DLLART Perf
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/**'
+      - 'analysis_options.yaml'
+      - 'bin/**'
+      - 'example/**'
+      - 'lib/**'
+      - 'native/**'
+      - 'pubspec.yaml'
+      - 'scripts/**'
+      - 'test/**'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'analysis_options.yaml'
+      - 'bin/**'
+      - 'example/**'
+      - 'lib/**'
+      - 'native/**'
+      - 'pubspec.yaml'
+      - 'scripts/**'
+      - 'test/**'
+
+jobs:
+  abi-gate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+
+      - name: Install Clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Resolve deps
+        run: dart pub get
+
+      - name: Build example
+        run: dart run dllart build --config example/calc/dllart.json
+
+      - name: ABI contract (skip rebuild)
+        run: dart run dllart test --config example/calc/dllart.json --skip-build --json
+
+  perf:
+    needs: abi-gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+
+      - name: Install Clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Resolve deps
+        run: dart pub get
+
+      - name: Build example
+        run: dart run dllart build --config example/calc/dllart.json
+
+      - name: Benchmark (single-thread)
+        run: |
+          mkdir -p .artifacts/perf
+          scripts/benchmark.sh 120000 | tee .artifacts/perf/benchmark.txt
+
+      - name: Benchmark (multi-thread)
+        run: |
+          mkdir -p .artifacts/perf
+          scripts/benchmark_threads.sh 8 8 50000 | tee .artifacts/perf/benchmark_threads.txt
+
+      - name: Perf gate
+        run: |
+          mkdir -p .artifacts/perf
+          dart run dllart test \
+            --config example/calc/dllart.json \
+            --skip-build \
+            --perf-gate \
+            --json | tee .artifacts/perf/perf_gate.json
+
+      - name: Upload perf artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dllart-perf
+          path: .artifacts/perf/**
