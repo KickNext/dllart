@@ -1567,7 +1567,7 @@ LoadedConfig? _inferConfigFromCurrentDirectory() {
   return LoadedConfig(
     config: DllartConfig(
       name: _normalizePackageName(p.basename(cwd)),
-      source: p.relative(sourcePath, from: cwd),
+      source: p.relative(sourcePath, from: cwd).replaceAll('\\', '/'),
       output: 'build',
       targets: List<String>.from(DllartConfig.defaultTargets),
     ),

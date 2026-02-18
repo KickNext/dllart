@@ -329,7 +329,8 @@ Object? ping() => 'pong';
         'cmd',
         ProcessResult(1, 7, '', 'boom'),
       );
-      expect(detailedSummary, contains('cmd failed (7): boom'));
+      expect(detailedSummary, contains('cmd failed (7):'));
+      expect(detailedSummary, contains('boom'));
     });
 
     test('package config helpers resolve package roots and paths', () async {
@@ -556,16 +557,20 @@ message Calc { int32 v = 1; }
           }
         });
 
-        final protocOk = File(p.join(tempRoot.path, 'protoc_ok.sh'))
-          ..writeAsStringSync(_scriptBody('echo libprotoc 99.1'))
-          ..setLastModifiedSync(DateTime.now());
+        final protocOk =
+            File(p.join(tempRoot.path, _scriptFileName('protoc_ok')))
+              ..writeAsStringSync(_scriptBody('echo libprotoc 99.1'))
+              ..setLastModifiedSync(DateTime.now());
         if (!Platform.isWindows) {
           Process.runSync('chmod', <String>['+x', protocOk.path]);
         }
 
-        final protocFail = File(p.join(tempRoot.path, 'protoc_fail.sh'))
-          ..writeAsStringSync(_scriptBody('exit 9'))
-          ..setLastModifiedSync(DateTime.now());
+        final protocFail =
+            File(p.join(tempRoot.path, _scriptFileName('protoc_fail')))
+              ..writeAsStringSync(
+                _scriptBody(Platform.isWindows ? 'exit /b 9' : 'exit 9'),
+              )
+              ..setLastModifiedSync(DateTime.now());
         if (!Platform.isWindows) {
           Process.runSync('chmod', <String>['+x', protocFail.path]);
         }
@@ -713,9 +718,35 @@ message Calc { int32 v = 1; }
         }
       });
 
-      final protoc = File(p.join(tempRoot.path, 'fake_protoc.sh'))
+      final protoc = File(p.join(tempRoot.path, _scriptFileName('fake_protoc')))
         ..writeAsStringSync(
-          _scriptBody(r'''
+          _scriptBody(
+            Platform.isWindows
+                ? r'''
+setlocal enabledelayedexpansion
+set "OUT="
+set "PROTO="
+:next
+if "%~1"=="" goto done
+set "ARG=%~1"
+set "CAND=!ARG:--dart_out=!"
+if /I not "!CAND!"=="!ARG!" (
+  set "OUT=!CAND!"
+  if /I "!OUT:~0,5!"=="grpc:" set "OUT=!OUT:~5!"
+)
+for %%F in ("!ARG!") do (
+  if /I "%%~xF"==".proto" set "PROTO=!ARG!"
+)
+shift
+goto next
+:done
+if "%OUT%"=="" exit /b 2
+if not exist "%OUT%" mkdir "%OUT%"
+for %%F in ("%PROTO%") do set "BASE=%%~nF"
+> "%OUT%\%BASE%.pb.dart" echo // generated
+exit /b 0
+'''
+                : r'''
 OUT=""
 PROTO=""
 for ARG in "$@"; do
@@ -734,7 +765,8 @@ done
 mkdir -p "$OUT"
 BASE="$(basename "$PROTO" .proto)"
 printf '%s\n' '// generated' > "$OUT/$BASE.pb.dart"
-'''),
+''',
+          ),
         );
       if (!Platform.isWindows) {
         Process.runSync('chmod', <String>['+x', protoc.path]);

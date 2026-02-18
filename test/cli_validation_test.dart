@@ -52,8 +52,9 @@ set "PROTO="
 :next
 if "%~1"=="" goto done
 set "ARG=%~1"
-if /I "!ARG:~0,11!"=="--dart_out=" (
-  set "OUT=!ARG:~11!"
+set "CAND=!ARG:--dart_out=!"
+if /I not "!CAND!"=="!ARG!" (
+  set "OUT=!CAND!"
   if /I "!OUT:~0,5!"=="grpc:" set "OUT=!OUT:~5!"
 )
 for %%F in ("!ARG!") do (

@@ -429,9 +429,12 @@ void main() {
 
       expect(
         loaded.resolvePath('lib/module.dart'),
-        '/tmp/project/lib/module.dart',
+        p.normalize('/tmp/project/lib/module.dart'),
       );
-      expect(loaded.resolvePath('/tmp/other.dart'), '/tmp/other.dart');
+      expect(
+        loaded.resolvePath('/tmp/other.dart'),
+        p.normalize('/tmp/other.dart'),
+      );
     });
 
     test('Doctor report json status reflects summary', () {

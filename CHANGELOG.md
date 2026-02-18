@@ -9,6 +9,8 @@
   no `pubspec.yaml` (common `init`-only layout).
 - Improved `package --target=all --auto-build` preflight to report aggregated
   environment/toolchain blockers before attempting builds.
+- Removed internal research/readiness/RFC docs from repository root docs set to
+  keep user-facing documentation focused.
 - Documented embedded runtime library compatibility boundaries:
   - `dart:io` is currently unsupported in module call paths.
   - Added explicit guidance in README + deployment/compatibility/migration docs.

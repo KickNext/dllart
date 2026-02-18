@@ -44,6 +44,10 @@ Run locally in a repo (without global activation):
 dart run dllart <command>
 ```
 
+Package page:
+
+- https://pub.dev/packages/dllart
+
 ## Quick Start
 
 Start path:
@@ -482,37 +486,18 @@ dllart package csharp --force
 - `typed_fallback_add`: `1157411 calls/s`
 - `typed_direct_add`: `1213666 calls/s`
 
-## pub.dev Readiness
-
-This repository is prepared for publishing:
-
-- English README and docs
-- `LICENSE`
-- `CHANGELOG.md`
-- `example/` content
-- publishing checklist in `doc/PUBLISHING.md`
-- package metadata in `pubspec.yaml`
-
-Before publishing:
-
-```bash
-dart pub get
-dart analyze
-dart pub publish --dry-run
-```
-
 ## Documentation
 
-- Runtime architecture RFC: `doc/rfcs/0001-runtime-architecture.md`
-- Research notes: `doc/research/2026-02-ffi-study.md`
-- Publishing guide: `doc/PUBLISHING.md`
 - MCP server guide: `doc/MCP.md`
-- Production readiness report: `doc/PRODUCTION_READINESS.md`
 - Deployment playbook: `doc/DEPLOYMENT.md`
 - Compatibility matrix: `doc/COMPATIBILITY_MATRIX.md`
 - Migration guide: `doc/MIGRATION_GUIDE.md`
+- Config schema: `doc/schema/dllart.schema.json`
+- Release maintainer guide: `doc/PUBLISHING.md`
 
-## Validation
+## Validation (Repository Checkout)
+
+These checks expect a full repository checkout (with `scripts/` and test assets):
 
 ```bash
 dart run dllart doctor --config example/calc/dllart.json

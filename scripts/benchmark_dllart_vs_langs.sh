@@ -5,7 +5,7 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SRC_DIR="$ROOT_DIR/scripts/benchmarks/library_compare"
 BUILD_DIR="$ROOT_DIR/build/library_compare"
 TMP_DIR="$BUILD_DIR/tmp"
-REPORT_PATH="${1:-$ROOT_DIR/doc/research/dllart-vs-cpp-rust-go.md}"
+REPORT_PATH="${1:-$ROOT_DIR/doc/dllart-vs-cpp-rust-go.md}"
 
 ITERATIONS="${BENCH_ITERATIONS:-100000000}"
 FILE_MB="${BENCH_FILE_MB:-256}"

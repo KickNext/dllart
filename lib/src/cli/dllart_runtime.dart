@@ -380,11 +380,23 @@ String _asText(Object? value) {
   return value.toString();
 }
 
+List<String> _firstNonEmptyLines(String text, {required int maxLines}) {
+  final lines = <String>[];
+  for (final raw in text.split('\n')) {
+    final line = raw.trim();
+    if (line.isEmpty) {
+      continue;
+    }
+    lines.add(line);
+    if (lines.length >= maxLines) {
+      break;
+    }
+  }
+  return lines;
+}
+
 String? _firstNonEmptyLine(String text) {
-  final lines = text
-      .split('\n')
-      .map((line) => line.trim())
-      .where((line) => line.isNotEmpty);
+  final lines = _firstNonEmptyLines(text, maxLines: 1);
   if (lines.isEmpty) {
     return null;
   }
@@ -392,12 +404,29 @@ String? _firstNonEmptyLine(String text) {
 }
 
 String _processFailureSummary(String commandLabel, ProcessResult result) {
-  final combined = '${_asText(result.stderr)}\n${_asText(result.stdout)}';
-  final line = _firstNonEmptyLine(combined);
-  if (line == null) {
+  const maxLines = 6;
+  const maxLineLength = 220;
+  final details = <String>[
+    ..._firstNonEmptyLines(_asText(result.stderr), maxLines: maxLines),
+  ];
+  if (details.length < maxLines) {
+    details.addAll(
+      _firstNonEmptyLines(
+        _asText(result.stdout),
+        maxLines: maxLines - details.length,
+      ),
+    );
+  }
+  if (details.isEmpty) {
     return '$commandLabel failed with exit code ${result.exitCode}';
   }
-  return '$commandLabel failed (${result.exitCode}): $line';
+  final compact = details.map((line) {
+    if (line.length <= maxLineLength) {
+      return line;
+    }
+    return '${line.substring(0, maxLineLength - 3)}...';
+  }).toList();
+  return '$commandLabel failed (${result.exitCode}):\n${compact.join('\n')}';
 }
 
 String _sha256Bytes(List<int> bytes) {

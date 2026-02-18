@@ -26,13 +26,6 @@ AGENT.md
 scripts/
 test/
 
-# Keep docs needed by users, omit internal research/rfc/release process notes
-doc/research/
-doc/rfcs/
-doc/PRODUCTION_READINESS.md
-doc/REQUIRED_IMPROVEMENTS_CHECKLIST.md
-doc/PUBLISHING.md
-
 # Keep high-level example, omit local client scaffolds and bridge internals
 example/calc/native/
 example/calc/c_client/

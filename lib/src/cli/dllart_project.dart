@@ -43,7 +43,7 @@ Future<void> _commandCreate(ParsedArgs args) async {
     toolRoot: toolRoot,
   );
   final dllartVersion = _dllartPackageVersion(toolRoot);
-  final sourceRel = p.join('lib', 'module.dart');
+  final sourceRel = 'lib/module.dart';
   final outputRel = 'build';
   final configPath = p.join(projectPath, 'dllart.json');
 
@@ -129,7 +129,7 @@ Future<void> _commandInit(ParsedArgs args) async {
     throw ToolError('Module name is empty. Pass --name=<module>.');
   }
 
-  final source = args['source'] ?? p.join('lib', 'module.dart');
+  final source = args['source'] ?? 'lib/module.dart';
   final output = args['output'] ?? 'build';
   final configPath = p.normalize(p.absolute(args['config'] ?? 'dllart.json'));
   final sourcePath = p.normalize(p.absolute(source));
@@ -143,7 +143,9 @@ Future<void> _commandInit(ParsedArgs args) async {
 
   final config = DllartConfig(
     name: name,
-    source: p.relative(sourcePath, from: p.dirname(configPath)),
+    source: p
+        .relative(sourcePath, from: p.dirname(configPath))
+        .replaceAll('\\', '/'),
     output: output,
     targets: List<String>.from(DllartConfig.defaultTargets),
   );
@@ -461,9 +463,7 @@ _CreateDependencySelection _resolveCreateDependencySelection(
   }
 
   if (rawDllartPath.isNotEmpty && mode == _CreateDependencyMode.version) {
-    throw ToolError(
-      '--dllart-path cannot be used with --dependency=version.',
-    );
+    throw ToolError('--dllart-path cannot be used with --dependency=version.');
   }
 
   final resolvedDllartPath = rawDllartPath.isEmpty

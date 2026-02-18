@@ -1,5 +1,13 @@
 part of dllart_cli;
 
+String _frontendPathArg(String path) {
+  final normalized = p.normalize(path);
+  if (!Platform.isWindows) {
+    return normalized;
+  }
+  return normalized.replaceAll('\\', '/');
+}
+
 Future<void> _commandBuild(ParsedArgs args) async {
   _applyLoggingFromConfig(null);
   final jsonMode = _isJsonMode(args);
@@ -79,19 +87,19 @@ Future<void> _commandBuild(ParsedArgs args) async {
 
       final aotDill = p.join(workDir.path, 'module.aot.dill');
       final frontendArgs = <String>[
-        toolchain.frontendServer,
-        '--sdk-root=${toolchain.sdkRoot}',
+        _frontendPathArg(toolchain.frontendServer),
+        '--sdk-root=${_frontendPathArg(toolchain.sdkRoot)}',
         '--target=vm',
         '--aot',
         '--tfa',
-        '--platform=${toolchain.platformDill}',
+        '--platform=${_frontendPathArg(toolchain.platformDill)}',
       ];
       if (packagesConfig != null) {
-        frontendArgs.add('--packages=$packagesConfig');
+        frontendArgs.add('--packages=${_frontendPathArg(packagesConfig)}');
       }
       frontendArgs.addAll(<String>[
-        '--output-dill=$aotDill',
-        generatedEntrypoint,
+        '--output-dill=${_frontendPathArg(aotDill)}',
+        _frontendPathArg(generatedEntrypoint),
       ]);
 
       _logLine('[1/4] Compiling AOT dill');
