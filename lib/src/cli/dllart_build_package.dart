@@ -2,10 +2,15 @@ part of dllart_cli;
 
 String _frontendPathArg(String path) {
   final normalized = p.normalize(path);
+  return normalized;
+}
+
+String _frontendUriArg(String path) {
+  final normalized = p.normalize(path);
   if (!Platform.isWindows) {
     return normalized;
   }
-  return normalized.replaceAll('\\', '/');
+  return Uri.file(normalized, windows: true).toString();
 }
 
 Future<void> _commandBuild(ParsedArgs args) async {
@@ -88,18 +93,18 @@ Future<void> _commandBuild(ParsedArgs args) async {
       final aotDill = p.join(workDir.path, 'module.aot.dill');
       final frontendArgs = <String>[
         _frontendPathArg(toolchain.frontendServer),
-        '--sdk-root=${_frontendPathArg(toolchain.sdkRoot)}',
+        '--sdk-root=${_frontendUriArg(toolchain.sdkRoot)}',
         '--target=vm',
         '--aot',
         '--tfa',
-        '--platform=${_frontendPathArg(toolchain.platformDill)}',
+        '--platform=${_frontendUriArg(toolchain.platformDill)}',
       ];
       if (packagesConfig != null) {
-        frontendArgs.add('--packages=${_frontendPathArg(packagesConfig)}');
+        frontendArgs.add('--packages=${_frontendUriArg(packagesConfig)}');
       }
       frontendArgs.addAll(<String>[
-        '--output-dill=${_frontendPathArg(aotDill)}',
-        _frontendPathArg(generatedEntrypoint),
+        '--output-dill=${_frontendUriArg(aotDill)}',
+        _frontendUriArg(generatedEntrypoint),
       ]);
 
       _logLine('[1/4] Compiling AOT dill');
@@ -151,6 +156,9 @@ Future<void> _commandBuild(ParsedArgs args) async {
           '-o',
           aotObj,
         ]);
+        final snapshotSymbolDefines = await _snapshotSymbolDefinesForObject(
+          aotObj,
+        );
 
         final runtimePathForDefine = toolchain.dartaot.replaceAll('\\', '/');
         final runtimeDefine =
@@ -172,6 +180,7 @@ Future<void> _commandBuild(ParsedArgs args) async {
           '-DDLLART_BYTES_OUT_MAX_BYTES=${loaded.config.limits.bytesOutMaxBytes}',
           '-DDLLART_METHOD_CACHE_MAX_ENTRIES=${loaded.config.limits.methodCacheMaxEntries}',
           '-DDLLART_RUNTIME_PROFILE="${_escapeCString(runtimeProfile)}"',
+          ...snapshotSymbolDefines,
           '-I${toolchain.sdkInclude}',
           bridgeSource,
           aotObj,
@@ -536,6 +545,9 @@ Future<Map<String, Object?>> _buildAndroidArtifacts({
 
     _logLine('[android:$abi] Assembling object');
     await _runCommand(clangPath, <String>['-c', asmPath, '-o', objPath]);
+    final snapshotSymbolDefines = await _snapshotSymbolDefinesForObject(
+      objPath,
+    );
 
     final abiDir = Directory(p.join(outputPath, 'lib', 'android', abi));
     abiDir.createSync(recursive: true);
@@ -555,6 +567,7 @@ Future<Map<String, Object?>> _buildAndroidArtifacts({
       '-DDLLART_BYTES_OUT_MAX_BYTES=${limits.bytesOutMaxBytes}',
       '-DDLLART_METHOD_CACHE_MAX_ENTRIES=${limits.methodCacheMaxEntries}',
       '-DDLLART_RUNTIME_PROFILE="${_escapeCString(runtimeProfile)}"',
+      ...snapshotSymbolDefines,
       '-I${toolchain.sdkInclude}',
       bridgeSource,
       objPath,
@@ -645,6 +658,9 @@ Future<Map<String, Object?>> _buildIosArtifacts({
       '-o',
       objPath,
     ]);
+    final snapshotSymbolDefines = await _snapshotSymbolDefinesForObject(
+      objPath,
+    );
 
     _logLine('[ios:$name] Linking dynamic library');
     await _runCommand('xcrun', <String>[
@@ -664,6 +680,7 @@ Future<Map<String, Object?>> _buildIosArtifacts({
       '-DDLLART_BYTES_OUT_MAX_BYTES=${limits.bytesOutMaxBytes}',
       '-DDLLART_METHOD_CACHE_MAX_ENTRIES=${limits.methodCacheMaxEntries}',
       '-DDLLART_RUNTIME_PROFILE="${_escapeCString(runtimeProfile)}"',
+      ...snapshotSymbolDefines,
       '-I${toolchain.sdkInclude}',
       bridgeSource,
       objPath,
@@ -865,6 +882,115 @@ String _resolveIosGenSnapshot({
     'No gen_snapshot configured for iOS arch $arch. '
     'Set $envKey to a target-specific gen_snapshot binary.',
   );
+}
+
+const List<String> _snapshotSymbolNames = <String>[
+  'kDartVmSnapshotData',
+  'kDartVmSnapshotInstructions',
+  'kDartIsolateSnapshotData',
+  'kDartIsolateSnapshotInstructions',
+];
+
+String _normalizeSnapshotSymbolName(String value) {
+  var out = value;
+  while (out.startsWith('_')) {
+    out = out.substring(1);
+  }
+  return out;
+}
+
+int _snapshotLeadingUnderscoreCount(String value) {
+  var i = 0;
+  while (i < value.length && value.codeUnitAt(i) == 95) {
+    i++;
+  }
+  return i;
+}
+
+String? _hostNmExecutable() {
+  if (Platform.isWindows) {
+    return _findExecutable(<String>[
+          'llvm-nm.exe',
+          'nm.exe',
+          'llvm-nm',
+          'nm',
+        ]) ??
+        _firstExistingFile(<String>[
+          r'C:\Program Files\LLVM\bin\llvm-nm.exe',
+          r'C:\Program Files\LLVM\bin\nm.exe',
+        ]);
+  }
+  return _findExecutable(<String>['nm']) ??
+      _firstExistingFile(<String>['/usr/bin/nm', '/usr/local/bin/nm']);
+}
+
+Future<List<String>> _snapshotSymbolDefinesForObject(String objectPath) async {
+  if (!(Platform.isLinux || Platform.isWindows)) {
+    return const <String>[];
+  }
+
+  final nmExecutable = _hostNmExecutable();
+  if (nmExecutable == null) {
+    return const <String>[];
+  }
+
+  final args = <String>['--defined-only', objectPath];
+  final result = await _runCommandCapture(nmExecutable, args);
+  if (result.exitCode != 0) {
+    throw ToolError(
+      _processFailureSummary('$nmExecutable ${args.join(' ')}', result),
+    );
+  }
+
+  final symbols = <String>{};
+  final text = '${_asText(result.stdout)}\n${_asText(result.stderr)}';
+  for (final rawLine in text.split('\n')) {
+    final line = rawLine.trim();
+    if (line.isEmpty) {
+      continue;
+    }
+    final parts = line.split(RegExp(r'\s+'));
+    if (parts.isEmpty) {
+      continue;
+    }
+    final symbol = parts.last.trim();
+    if (symbol.isNotEmpty) {
+      symbols.add(symbol);
+    }
+  }
+
+  final resolved = <String, String>{};
+  for (final symbol in symbols) {
+    final normalized = _normalizeSnapshotSymbolName(symbol);
+    if (!_snapshotSymbolNames.contains(normalized)) {
+      continue;
+    }
+    final current = resolved[normalized];
+    if (current == null ||
+        _snapshotLeadingUnderscoreCount(symbol) <
+            _snapshotLeadingUnderscoreCount(current)) {
+      resolved[normalized] = symbol;
+    }
+  }
+
+  final missing = _snapshotSymbolNames
+      .where((symbol) => !resolved.containsKey(symbol))
+      .toList(growable: false);
+  if (missing.isNotEmpty) {
+    throw ToolError(
+      'Missing required AOT snapshot symbols in ${_displayPath(objectPath)}: '
+      '${missing.join(', ')}',
+    );
+  }
+
+  final defines = <String>[];
+  for (final symbol in _snapshotSymbolNames) {
+    final actual = resolved[symbol]!;
+    if (actual != symbol) {
+      defines.add('-D$symbol=$actual');
+    }
+  }
+  return defines;
 }
 
 List<String> _requiredAbiSymbols(String moduleName) {
